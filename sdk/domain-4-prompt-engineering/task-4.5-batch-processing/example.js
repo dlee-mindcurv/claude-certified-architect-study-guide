@@ -1,0 +1,336 @@
+/**
+ * Task 4.5 -- Message Batches API for Cost-Efficient Bulk Processing
+ *
+ * Exam relevance:
+ * - Message Batches API: 50% cost savings, up to 24-hour processing
+ * - No guaranteed latency SLA -- appropriate for non-blocking workloads
+ * - custom_id for correlating results to source documents
+ * - Batch API does NOT support multi-turn tool calling
+ * - SLA calculation: pipeline_window + 24_hours = total guarantee
+ * - Handle failures by resubmitting only failed documents
+ * - Scenarios 5 (CI/CD) and 6 (Data Extraction)
+ *
+ * This example demonstrates:
+ * 1. Creating batch requests with custom_id
+ * 2. Submitting via Message Batches API
+ * 3. Polling for completion
+ * 4. Processing results and handling failures
+ * 5. Resubmitting failed items
+ * 6. SLA calculation
+ *
+ * Run: node sdk/domain-4-prompt-engineering/task-4.5-batch-processing/example.js
+ */
+
+import 'dotenv/config';
+import Anthropic from '@anthropic-ai/sdk';
+import { documentExtractionTool } from '../../../shared/schemas/extraction-output.js';
+import { getDocumentIds, getDocument } from '../../../shared/tools/extraction-tools.js';
+
+// ─── Configuration ──────────────────────────────────────────────────────────
+
+const client = new Anthropic();
+const MODEL = 'claude-sonnet-4-20250514';
+
+// ─── Step 1: Build Batch Requests ───────────────────────────────────────────
+//
+// EXAM KEY CONCEPT: Each batch request includes:
+// - custom_id: Correlation key returned in results (your document identifier)
+// - params: Standard messages.create parameters (model, max_tokens, messages, tools)
+
+function buildBatchRequests(documentIds) {
+  console.log('Building batch requests...\n');
+
+  const requests = [];
+
+  for (const docId of documentIds) {
+    const doc = getDocument(docId);
+    if (!doc) continue;
+
+    // ── Build the request ─────────────────────────────────────────────
+    // EXAM NOTE: custom_id must be unique within the batch
+    const request = {
+      custom_id: `extract-${docId}`,
+      params: {
+        model: MODEL,
+        max_tokens: 2048,
+        // ── Forced tool selection works in batch ────────────────────
+        // tool_choice and tools are supported in batch requests
+        tools: [documentExtractionTool],
+        tool_choice: { type: 'tool', name: 'extract_document_info' },
+        messages: [
+          {
+            role: 'user',
+            content: `Extract structured information from this document. The document_id is "${docId}".
+Return null for fields not present in the source. Compare calculated and stated totals.
+
+Document:
+${doc.raw}`,
+          },
+        ],
+      },
+    };
+
+    requests.push(request);
+    console.log(`  Request: ${request.custom_id}`);
+  }
+
+  return requests;
+}
+
+// ─── Step 2: Submit Batch ───────────────────────────────────────────────────
+
+async function submitBatch(requests) {
+  console.log(`\nSubmitting batch with ${requests.length} requests...`);
+
+  // ── EXAM KEY CONCEPT: message_batches.create ──────────────────────
+  // The API accepts an array of requests and returns a batch object
+  // with an id for polling.
+  const batch = await client.messages.batches.create({
+    requests,
+  });
+
+  console.log(`  Batch ID: ${batch.id}`);
+  console.log(`  Status: ${batch.processing_status}`);
+  console.log(`  Created: ${batch.created_at}`);
+
+  return batch;
+}
+
+// ─── Step 3: Poll for Completion ────────────────────────────────────────────
+
+async function pollBatchCompletion(batchId, intervalMs = 5000, maxWaitMs = 300000) {
+  console.log(`\nPolling batch ${batchId} for completion...`);
+
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const batch = await client.messages.batches.retrieve(batchId);
+
+    console.log(
+      `  Status: ${batch.processing_status} ` +
+      `(${batch.request_counts.succeeded} succeeded, ` +
+      `${batch.request_counts.errored} errored, ` +
+      `${batch.request_counts.processing} processing)`
+    );
+
+    if (batch.processing_status === 'ended') {
+      console.log('  Batch complete!');
+      return batch;
+    }
+
+    // Wait before polling again
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+
+  console.log('  Polling timeout reached');
+  return null;
+}
+
+// ─── Step 4: Process Results ────────────────────────────────────────────────
+
+async function processResults(batchId) {
+  console.log(`\nProcessing results for batch ${batchId}...`);
+
+  const results = {
+    succeeded: [],
+    failed: [],
+    expired: [],
+  };
+
+  // ── Iterate over batch results ──────────────────────────────────────
+  // EXAM NOTE: Results are streamed via an async iterator
+  for await (const result of client.messages.batches.results(batchId)) {
+    const customId = result.custom_id;
+
+    if (result.result.type === 'succeeded') {
+      // ── Extract the tool_use output ─────────────────────────────
+      const message = result.result.message;
+      const toolUse = message.content.find(b => b.type === 'tool_use');
+
+      results.succeeded.push({
+        custom_id: customId,
+        extraction: toolUse ? toolUse.input : null,
+      });
+      console.log(`  SUCCESS: ${customId}`);
+
+    } else if (result.result.type === 'errored') {
+      results.failed.push({
+        custom_id: customId,
+        error: result.result.error,
+      });
+      console.log(`  ERRORED: ${customId} -- ${result.result.error?.message || 'unknown error'}`);
+
+    } else if (result.result.type === 'expired') {
+      results.expired.push({ custom_id: customId });
+      console.log(`  EXPIRED: ${customId}`);
+
+    } else if (result.result.type === 'canceled') {
+      console.log(`  CANCELED: ${customId}`);
+    }
+  }
+
+  return results;
+}
+
+// ─── Step 5: Resubmit Failed Items ─────────────────────────────────────────
+//
+// EXAM KEY CONCEPT: Resubmit ONLY the failed items, not the entire batch.
+// For small numbers of failures, use the real-time API instead of a new batch.
+
+async function resubmitFailures(failedItems, originalRequests) {
+  if (failedItems.length === 0) {
+    console.log('\nNo failures to resubmit.');
+    return [];
+  }
+
+  console.log(`\nResubmitting ${failedItems.length} failed items...`);
+
+  const failedIds = new Set(failedItems.map(f => f.custom_id));
+
+  // For small numbers, use real-time API
+  if (failedItems.length <= 3) {
+    console.log('  Using real-time API for small number of failures');
+
+    const retryResults = [];
+    for (const item of failedItems) {
+      const originalRequest = originalRequests.find(r => r.custom_id === item.custom_id);
+      if (!originalRequest) continue;
+
+      try {
+        const response = await client.messages.create(originalRequest.params);
+        const toolUse = response.content.find(b => b.type === 'tool_use');
+        retryResults.push({
+          custom_id: item.custom_id,
+          extraction: toolUse ? toolUse.input : null,
+          retried: true,
+        });
+        console.log(`  Retry SUCCESS: ${item.custom_id}`);
+      } catch (err) {
+        console.log(`  Retry FAILED: ${item.custom_id} -- ${err.message}`);
+        retryResults.push({
+          custom_id: item.custom_id,
+          extraction: null,
+          error: err.message,
+          retried: true,
+        });
+      }
+    }
+    return retryResults;
+  }
+
+  // For many failures, submit a new batch
+  console.log('  Submitting new batch for failures');
+  const retryRequests = originalRequests.filter(r => failedIds.has(r.custom_id));
+  const retryBatch = await submitBatch(retryRequests);
+  const retryBatchResult = await pollBatchCompletion(retryBatch.id);
+  if (retryBatchResult) {
+    return processResults(retryBatch.id);
+  }
+  return [];
+}
+
+// ─── SLA Calculation ────────────────────────────────────────────────────────
+
+function calculateSLA() {
+  console.log('\n' + '='.repeat(60));
+  console.log('SLA CALCULATION');
+  console.log('='.repeat(60));
+
+  // Example: Pipeline with 4-hour processing window + batch step
+  const processingWindowHours = 4;
+  const batchMaxHours = 24;
+  const safetyMarginHours = 2;
+
+  const totalSLAHours = processingWindowHours + batchMaxHours + safetyMarginHours;
+
+  console.log(`
+  Pipeline processing window:  ${processingWindowHours} hours
+  Batch API max latency:       ${batchMaxHours} hours (no guaranteed SLA)
+  Safety margin:               ${safetyMarginHours} hours
+  ─────────────────────────────────────
+  Total pipeline guarantee:    ${totalSLAHours} hours
+
+  EXAM KEY CONCEPT: The Batch API has NO guaranteed latency SLA.
+  Results can take up to 24 hours. When calculating pipeline SLAs,
+  add the 24-hour maximum to any other processing time.
+
+  In practice, most batches complete in 1-2 hours, but you cannot
+  guarantee this for SLA commitments.
+
+  Example exam question:
+  "A batch extraction pipeline has a 4-hour data processing window.
+   What is the maximum end-to-end time guarantee?"
+  Answer: 4 + 24 = 28 hours minimum (round to 30 for safety margin)
+`);
+}
+
+// ─── Main ───────────────────────────────────────────────────────────────────
+
+async function main() {
+  console.log('Task 4.5 -- Message Batches API\n');
+  console.log('Demonstrating batch submission, polling, and failure handling.\n');
+
+  // Build requests for all sample documents
+  const documentIds = getDocumentIds();
+  const requests = buildBatchRequests(documentIds);
+
+  // Submit the batch
+  const batch = await submitBatch(requests);
+
+  // Poll for completion
+  const completedBatch = await pollBatchCompletion(batch.id);
+
+  if (completedBatch) {
+    // Process results
+    const results = await processResults(batch.id);
+
+    console.log(`\n--- Results Summary ---`);
+    console.log(`  Succeeded: ${results.succeeded.length}`);
+    console.log(`  Failed: ${results.failed.length}`);
+    console.log(`  Expired: ${results.expired.length}`);
+
+    // Resubmit failures if any
+    const allFailed = [...results.failed, ...results.expired];
+    if (allFailed.length > 0) {
+      await resubmitFailures(allFailed, requests);
+    }
+
+    // Show extractions
+    for (const result of results.succeeded) {
+      console.log(`\n  ${result.custom_id}:`);
+      if (result.extraction) {
+        console.log(`    type: ${result.extraction.document_type}`);
+        console.log(`    date: ${result.extraction.date}`);
+        const conflicts = (result.extraction.monetary_values || [])
+          .filter(mv => mv.conflict_detected);
+        if (conflicts.length > 0) {
+          console.log(`    conflicts: ${conflicts.length}`);
+        }
+      }
+    }
+  }
+
+  // SLA calculation demonstration
+  calculateSLA();
+
+  console.log('\n' + '='.repeat(60));
+  console.log('KEY TAKEAWAYS');
+  console.log('='.repeat(60));
+  console.log(`
+1. 50% COST SAVINGS: Batch API is half the price of real-time API.
+
+2. NO LATENCY SLA: Up to 24 hours. Use for non-blocking workloads only.
+
+3. custom_id: Your correlation key -- returned unchanged in results.
+
+4. NO MULTI-TURN: Each request is a single API call. Cannot do
+   agentic loops or multi-step tool calling within a batch.
+
+5. FAILURE HANDLING: Resubmit only failed items, not the entire batch.
+   For small failures, use real-time API instead.
+
+6. SLA MATH: pipeline_window + 24_hours + safety_margin = guarantee
+`);
+}
+
+main().catch(console.error);

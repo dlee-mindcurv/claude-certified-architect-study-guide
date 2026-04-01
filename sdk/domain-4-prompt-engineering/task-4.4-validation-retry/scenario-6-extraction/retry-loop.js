@@ -1,0 +1,399 @@
+/**
+ * Scenario 6 (Data Extraction) -- Full Extraction Retry Loop
+ *
+ * Exam relevance:
+ * - Task 4.4: Validation-retry with error classification
+ * - Retryable (format mismatch) vs non-retryable (info absent) errors
+ * - Self-correction: stated_total vs calculated_total conflict detection
+ * - Pattern tracking for systematic prompt improvement
+ *
+ * This module implements the complete extraction retry pipeline:
+ * 1. Extract with forced tool_use (Task 4.3)
+ * 2. Validate against schema and business rules
+ * 3. Classify errors as retryable or non-retryable
+ * 4. Retry with error feedback for retryable errors
+ * 5. Accept partial results for non-retryable errors
+ * 6. Track error patterns for systematic analysis
+ *
+ * Run: node sdk/domain-4-prompt-engineering/task-4.4-validation-retry/scenario-6-extraction/retry-loop.js
+ */
+
+import 'dotenv/config';
+import Anthropic from '@anthropic-ai/sdk';
+import { documentExtractionTool } from '../../../../shared/schemas/extraction-output.js';
+import { getDocumentIds, getDocument } from '../../../../shared/tools/extraction-tools.js';
+
+// ─── Configuration ──────────────────────────────────────────────────────────
+
+const client = new Anthropic();
+const MODEL = 'claude-sonnet-4-20250514';
+const MAX_RETRIES = 2;
+
+// ─── Validation Rules ───────────────────────────────────────────────────────
+
+const VALIDATION_RULES = [
+  // ── Required fields ───────────────────────────────────────────────
+  {
+    name: 'required-document-id',
+    check: (e) => !!e.document_id,
+    errorMessage: 'document_id is required',
+    errorType: 'retryable',
+    pattern: 'missing-required-field',
+  },
+  {
+    name: 'required-document-type',
+    check: (e) => !!e.document_type,
+    errorMessage: 'document_type is required',
+    errorType: 'retryable',
+    pattern: 'missing-required-field',
+  },
+  {
+    name: 'required-field-confidence',
+    check: (e) => !!e.field_confidence && typeof e.field_confidence === 'object',
+    errorMessage: 'field_confidence object is required',
+    errorType: 'retryable',
+    pattern: 'missing-required-field',
+  },
+
+  // ── Format validation ─────────────────────────────────────────────
+  {
+    name: 'valid-date-format',
+    check: (e) => {
+      if (e.date === null || e.date === undefined) return true;
+      return /^\d{4}(-\d{2}(-\d{2})?)?$/.test(e.date);
+    },
+    errorMessage: (e) => `date "${e.date}" is not ISO 8601 (YYYY, YYYY-MM, or YYYY-MM-DD)`,
+    errorType: 'retryable',
+    pattern: 'date-format-mismatch',
+  },
+  {
+    name: 'valid-document-type-enum',
+    check: (e) => {
+      const valid = ['invoice', 'contract', 'research_paper', 'receipt', 'letter', 'report', 'other'];
+      return valid.includes(e.document_type);
+    },
+    errorMessage: (e) => `document_type "${e.document_type}" not in enum`,
+    errorType: 'retryable',
+    pattern: 'enum-violation',
+  },
+  {
+    name: 'valid-confidence-range',
+    check: (e) => {
+      if (!e.field_confidence) return true;
+      return Object.values(e.field_confidence).every(v => typeof v === 'number' && v >= 0 && v <= 1);
+    },
+    errorMessage: 'All confidence scores must be numbers between 0 and 1',
+    errorType: 'retryable',
+    pattern: 'confidence-out-of-range',
+  },
+  {
+    name: 'valid-entity-roles',
+    check: (e) => {
+      if (!e.entities || e.entities.length === 0) return true;
+      const validRoles = ['vendor', 'client', 'author', 'recipient', 'party', 'other'];
+      return e.entities.every(ent => validRoles.includes(ent.role));
+    },
+    errorMessage: (e) => {
+      const invalidRoles = (e.entities || [])
+        .filter(ent => !['vendor', 'client', 'author', 'recipient', 'party', 'other'].includes(ent.role))
+        .map(ent => `"${ent.role}"`);
+      return `Invalid entity roles: ${invalidRoles.join(', ')}`;
+    },
+    errorType: 'retryable',
+    pattern: 'enum-violation',
+  },
+
+  // ── Self-correction validation ────────────────────────────────────
+  {
+    name: 'conflict-detection-consistency',
+    check: (e) => {
+      if (!e.monetary_values) return true;
+      for (const mv of e.monetary_values) {
+        if (mv.stated_value != null && mv.calculated_value != null) {
+          const diff = Math.abs(mv.stated_value - mv.calculated_value);
+          const hasConflict = diff > 0.01;
+          if (hasConflict !== mv.conflict_detected) return false;
+        }
+      }
+      return true;
+    },
+    errorMessage: 'conflict_detected flag does not match stated vs calculated comparison',
+    errorType: 'retryable',
+    pattern: 'conflict-detection-error',
+  },
+
+  // ── Key dates format validation ───────────────────────────────────
+  {
+    name: 'valid-key-dates-format',
+    check: (e) => {
+      if (!e.key_dates) return true;
+      return e.key_dates.every(kd => kd.label && kd.date);
+    },
+    errorMessage: 'Each key_date must have a label and date',
+    errorType: 'retryable',
+    pattern: 'incomplete-nested-object',
+  },
+];
+
+// ─── Validation Engine ──────────────────────────────────────────────────────
+
+function validate(extraction) {
+  const errors = [];
+  for (const rule of VALIDATION_RULES) {
+    try {
+      if (!rule.check(extraction)) {
+        const message = typeof rule.errorMessage === 'function'
+          ? rule.errorMessage(extraction)
+          : rule.errorMessage;
+        errors.push({
+          rule: rule.name,
+          message,
+          errorType: rule.errorType,
+          pattern: rule.pattern,
+        });
+      }
+    } catch (err) {
+      errors.push({
+        rule: rule.name,
+        message: `Validation error: ${err.message}`,
+        errorType: 'retryable',
+        pattern: 'validation-exception',
+      });
+    }
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    retryable: errors.filter(e => e.errorType === 'retryable'),
+    nonRetryable: errors.filter(e => e.errorType === 'non_retryable'),
+  };
+}
+
+// ─── Extraction with Retry ──────────────────────────────────────────────────
+
+/**
+ * Extract document data with validation-retry loop.
+ *
+ * @param {string} documentId - Document identifier
+ * @returns {object} { extraction, status, attempts, errorLog }
+ */
+async function extractWithRetry(documentId) {
+  const doc = getDocument(documentId);
+  if (!doc) {
+    return { extraction: null, status: 'error', error: `Document not found: ${documentId}` };
+  }
+
+  console.log(`\n${'━'.repeat(50)}`);
+  console.log(`Extracting: ${documentId} (type hint: ${doc.type})`);
+  console.log('━'.repeat(50));
+
+  const errorLog = [];
+  let attempt = 0;
+
+  const messages = [
+    {
+      role: 'user',
+      content: `Extract structured information from this document. The document_id is "${documentId}".
+
+Rules:
+- Return null for fields not present in the source -- do NOT fabricate values
+- For monetary values, independently calculate totals from line items
+- Compare calculated totals to stated totals and set conflict_detected accordingly
+- Include confidence scores (0-1) for each extracted field
+- Use ISO 8601 dates (YYYY-MM-DD)
+
+Document:
+${doc.raw}`,
+    },
+  ];
+
+  while (attempt <= MAX_RETRIES) {
+    attempt++;
+    console.log(`\n  Attempt ${attempt}/${MAX_RETRIES + 1}`);
+
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 2048,
+      tools: [documentExtractionTool],
+      tool_choice: { type: 'tool', name: 'extract_document_info' },
+      messages,
+    });
+
+    const toolUse = response.content.find(b => b.type === 'tool_use');
+    if (!toolUse) {
+      console.log('  ERROR: No tool_use block');
+      return { extraction: null, status: 'error', attempts: attempt, errorLog };
+    }
+
+    const extraction = toolUse.input;
+    console.log(`  type: ${extraction.document_type}, date: ${extraction.date}`);
+
+    // ── Validate ─────────────────────────────────────────────────────
+    const result = validate(extraction);
+
+    if (result.isValid) {
+      console.log('  VALID');
+      return { extraction, status: 'success', attempts: attempt, errorLog };
+    }
+
+    // Log errors
+    for (const err of result.errors) {
+      console.log(`  [${err.errorType}] ${err.message}`);
+      errorLog.push({ attempt, ...err });
+    }
+
+    // Only non-retryable errors remain -- accept partial
+    if (result.retryable.length === 0) {
+      console.log('  Accepting partial result (no retryable errors)');
+      return {
+        extraction,
+        status: 'partial',
+        attempts: attempt,
+        errorLog,
+        nonRetryableErrors: result.nonRetryable,
+      };
+    }
+
+    // Max retries reached
+    if (attempt > MAX_RETRIES) {
+      console.log('  Max retries exhausted');
+      return { extraction, status: 'max_retries', attempts: attempt, errorLog };
+    }
+
+    // ── Build retry with error feedback ─────────────────────────────
+    const errorFeedback = result.retryable
+      .map(e => `- ${e.message}`)
+      .join('\n');
+
+    messages.push({ role: 'assistant', content: response.content });
+    messages.push({
+      role: 'user',
+      content: `Your extraction has validation errors. Fix these specific issues:
+
+${errorFeedback}
+
+Re-extract using the extract_document_info tool with corrections.`,
+    });
+
+    console.log('  Retrying with error feedback...');
+  }
+}
+
+// ─── Error Pattern Analyzer ─────────────────────────────────────────────────
+
+/**
+ * Analyze error patterns across multiple extraction runs.
+ *
+ * EXAM KEY CONCEPT: Systematic pattern analysis reveals:
+ * - High-frequency retryable errors -> prompt improvement opportunity
+ * - Non-retryable errors -> source data limitations (accept and route to human)
+ * - Patterns that are always resolved by retry -> validation is working well
+ */
+function analyzePatterns(allErrorLogs) {
+  const stats = {};
+
+  for (const { documentId, errorLog, attempts, status } of allErrorLogs) {
+    for (const err of errorLog) {
+      if (!stats[err.pattern]) {
+        stats[err.pattern] = {
+          total: 0,
+          resolved_by_retry: 0,
+          unresolvable: 0,
+          documents: new Set(),
+        };
+      }
+      stats[err.pattern].total++;
+      stats[err.pattern].documents.add(documentId);
+
+      // If this was the last attempt and the status is not success,
+      // the error was not resolved
+      if (err.attempt === attempts && status !== 'success') {
+        stats[err.pattern].unresolvable++;
+      } else {
+        stats[err.pattern].resolved_by_retry++;
+      }
+    }
+  }
+
+  // Convert Sets to counts for JSON serialization
+  const result = {};
+  for (const [pattern, data] of Object.entries(stats)) {
+    result[pattern] = {
+      total_occurrences: data.total,
+      resolved_by_retry: data.resolved_by_retry,
+      unresolvable: data.unresolvable,
+      affected_documents: data.documents.size,
+      recommendation:
+        data.unresolvable > data.total * 0.5
+          ? 'PROMPT_IMPROVEMENT_NEEDED'
+          : data.resolved_by_retry === data.total
+            ? 'RETRY_EFFECTIVE'
+            : 'MONITOR',
+    };
+  }
+
+  return result;
+}
+
+// ─── Main ───────────────────────────────────────────────────────────────────
+
+async function main() {
+  console.log('Task 4.4 / Scenario 6 -- Full Extraction Retry Pipeline\n');
+
+  const documentIds = getDocumentIds();
+  const allResults = [];
+
+  for (const docId of documentIds) {
+    const result = await extractWithRetry(docId);
+    allResults.push({
+      documentId: docId,
+      ...result,
+    });
+  }
+
+  // ── Summary ─────────────────────────────────────────────────────────
+  console.log('\n' + '='.repeat(60));
+  console.log('EXTRACTION RESULTS SUMMARY');
+  console.log('='.repeat(60));
+
+  for (const r of allResults) {
+    const conflictsFound = r.extraction?.monetary_values?.filter(mv => mv.conflict_detected) || [];
+    console.log(
+      `  ${r.documentId}: ${r.status} (${r.attempts} attempt(s))` +
+      (conflictsFound.length > 0 ? ` -- ${conflictsFound.length} conflict(s) detected` : '')
+    );
+  }
+
+  // ── Pattern Analysis ──────────────────────────────────────────────
+  const allErrorLogs = allResults
+    .filter(r => r.errorLog && r.errorLog.length > 0)
+    .map(r => ({
+      documentId: r.documentId,
+      errorLog: r.errorLog,
+      attempts: r.attempts,
+      status: r.status,
+    }));
+
+  if (allErrorLogs.length > 0) {
+    console.log('\n' + '='.repeat(60));
+    console.log('ERROR PATTERN ANALYSIS');
+    console.log('='.repeat(60));
+    const patterns = analyzePatterns(allErrorLogs);
+    console.log(JSON.stringify(patterns, null, 2));
+  } else {
+    console.log('\nNo errors encountered -- all documents extracted cleanly.');
+  }
+
+  console.log(`
+PIPELINE DESIGN SUMMARY:
+1. FORCED TOOL_USE guarantees valid JSON structure (Task 4.3)
+2. VALIDATION catches semantic issues (wrong format, missing fields)
+3. ERROR CLASSIFICATION determines retry vs. accept-partial
+4. RETRY WITH FEEDBACK gives Claude context to self-correct
+5. PATTERN TRACKING identifies systematic prompt improvement needs
+6. SELF-CORRECTION (conflict_detected) provides built-in quality signals
+`);
+}
+
+main().catch(console.error);

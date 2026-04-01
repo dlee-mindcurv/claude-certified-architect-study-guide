@@ -1,0 +1,35 @@
+Title: Longitudinal Effects of Remote Work on Employee Productivity and Well-Being
+
+Authors: Dr. Maria Santos (Stanford University),
+         Dr. James Park (MIT Sloan School of Management),
+         Dr. Aisha Patel (London School of Economics)
+
+Published: Journal of Organizational Behavior, Vol 52, Issue 3, March 2025
+DOI: 10.1002/job.2025.0312
+Received: October 15, 2024
+Accepted: January 28, 2025
+
+Abstract:
+This longitudinal study tracked 8,200 knowledge workers across 45 companies
+over a 30-month period (January 2022 - June 2024) to assess the sustained
+effects of remote and hybrid work arrangements on productivity metrics and
+employee well-being indicators. Our findings reveal that hybrid workers
+(2-3 days remote per week) showed 12% higher productivity as measured by
+output-per-hour compared to fully in-office peers (p < 0.001), while fully
+remote workers showed 7% higher productivity (p < 0.01). Well-being scores,
+measured via the WHO-5 index, were 15% higher for hybrid workers and 9%
+higher for fully remote workers compared to in-office controls. However,
+career advancement rates for fully remote workers were 23% lower than
+in-office peers over the study period, suggesting a visibility penalty.
+Hybrid workers showed no statistically significant difference in advancement
+rates. These effects were consistent across industries, company sizes, and
+geographic regions, with minor variations by age cohort.
+
+Keywords: remote work, hybrid work, productivity, well-being, career advancement,
+          longitudinal study
+
+Sample Size: 8,200 participants
+Companies: 45
+Duration: 30 months
+Methodology: Mixed-methods longitudinal cohort study with quarterly surveys
+             and objective productivity metrics from company HR systems

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "project-tools": {
+      "comment": "TODO Step 4: Configure an MCP server. Fill in the fields below.",
+      "command": "",
+      "args": [],
+      "env": {
+        "comment": "TODO: Use env var expansion syntax: ${env:VAR_NAME}",
+        "API_KEY": "",
+        "DATABASE_URL": ""
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "project-tools": {
+      "command": "npx",
+      "args": ["-y", "@example/mcp-project-tools"],
+      "env": {
+        "API_KEY": "${env:PROJECT_API_KEY}",
+        "DATABASE_URL": "${env:DATABASE_URL}"
+      }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "POSTGRES_CONNECTION_STRING": "${env:DATABASE_URL}"
+      }
+    }
+  }
+}

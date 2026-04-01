@@ -1,0 +1,46 @@
+MASTER SERVICES AGREEMENT
+
+Agreement Number: MSA-2025-0134
+Effective Date: April 1, 2025
+
+PARTIES:
+  Client:   Northwind Traders, Inc. ("Client")
+            1200 Commerce Way, Seattle, WA 98101
+            Contact: Sarah Mitchell, VP of Engineering
+            Email: s.mitchell@northwindtraders.com
+
+  Provider: CloudScale Technologies LLC ("Provider")
+            500 Innovation Drive, San Jose, CA 95112
+            Contact: David Chen, Account Director
+            Email: d.chen@cloudscale.io
+
+TERM AND RENEWAL:
+  Initial Term: 36 months from Effective Date
+  Auto-Renewal: Yes, successive 12-month terms
+  Termination Notice: 90 days written notice before end of current term
+  Early Termination Fee: 50% of remaining contract value
+
+FINANCIAL TERMS:
+  Base Monthly Fee: $12,500/month
+  Annual Commitment: $150,000/year
+  Overage Rate: $0.05 per additional API call beyond 10M/month
+  Payment Terms: Net 45
+  Late Payment Penalty: 1.5% per month on overdue balance
+
+SERVICE LEVEL AGREEMENT:
+  Uptime Guarantee: 99.95%
+  Response Time (Critical): 15 minutes
+  Response Time (High): 1 hour
+  Response Time (Medium): 4 hours
+  Credit for SLA Breach: 5% of monthly fee per 0.01% below target
+
+GOVERNING LAW: State of Washington
+DISPUTE RESOLUTION: Binding arbitration for disputes under $100,000;
+                    litigation in King County Superior Court otherwise
+
+CONFIDENTIALITY: Both parties agree to maintain confidentiality of all
+proprietary information for a period of 3 years after termination.
+
+SIGNATURES:
+  Client: ___________________________  Date: ___________
+  Provider: _________________________  Date: ___________

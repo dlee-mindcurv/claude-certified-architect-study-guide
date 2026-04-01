@@ -1,0 +1,31 @@
+INVOICE #INV-2025-0087
+Date: March 22, 2025
+Due Date: April 21, 2025
+
+From: DataFlow Solutions Inc.
+      456 Tech Blvd, Suite 200
+      Austin, TX 78701
+
+Bill To: Meridian Healthcare Group
+         789 Medical Center Dr
+         Chicago, IL 60601
+
+Description                    Qty    Unit Price    Total
+─────────────────────────────────────────────────────────
+Data Pipeline Setup             1      $8,500.00    $8,500.00
+Monthly Monitoring (Mar)        1      $1,200.00    $1,200.00
+Custom Dashboard Build          3        $750.00    $2,250.00
+Emergency Support Hours         4        $200.00      $800.00
+─────────────────────────────────────────────────────────
+Subtotal                                           $12,750.00
+Tax (7.25%)                                           $924.38
+─────────────────────────────────────────────────────────
+TOTAL DUE                                          $13,674.38
+
+Payment Terms: Net 30
+Payment Method: Wire Transfer
+Bank: Chase Business, Routing: 021000021
+Account: ****7832
+
+Notes: Thank you for your continued partnership. Please reference
+invoice number INV-2025-0087 with your payment.

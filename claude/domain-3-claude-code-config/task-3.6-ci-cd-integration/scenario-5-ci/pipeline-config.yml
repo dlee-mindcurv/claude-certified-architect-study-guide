@@ -1,0 +1,160 @@
+# Scenario 5: Full CI Pipeline with Claude Code
+#
+# This pipeline demonstrates a complete CI integration where Claude Code
+# performs automated code review and test generation as separate, isolated jobs.
+#
+# Key concepts demonstrated:
+# - Non-interactive mode (-p flag)
+# - Structured output (--output-format json, --json-schema)
+# - Session isolation (separate jobs for review and test generation)
+# - CLAUDE.md providing context to CI
+# - Gate logic based on review severity
+
+name: Claude Code CI Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:  # Allow manual triggering
+
+concurrency:
+  group: claude-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Job 1: Automated Code Review (isolated session)
+  # ──────────────────────────────────────────────
+  code-review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      recommendation: ${{ steps.review.outputs.recommendation }}
+      critical-count: ${{ steps.review.outputs.critical_count }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run Code Review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          chmod +x ./ci/review-and-test.sh
+          ./ci/review-and-test.sh review
+
+          # Extract outputs for job dependencies
+          echo "recommendation=$(jq -r '.recommendation' review-results.json)" >> "$GITHUB_OUTPUT"
+          echo "critical_count=$(jq '[.issues[] | select(.severity == "critical")] | length' review-results.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Review Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-results
+          path: review-results.json
+
+      - name: Post Review Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = JSON.parse(fs.readFileSync('review-results.json', 'utf8'));
+            const body = `## Automated Code Review\n\n${review.summary}\n\n**Recommendation:** ${review.recommendation}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+  # ──────────────────────────────────────────────
+  # Job 2: Test Generation (isolated session)
+  # ──────────────────────────────────────────────
+  test-generation:
+    name: Claude Test Generation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Dependencies
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          pnpm install --frozen-lockfile
+
+      - name: Generate Tests for Changed Files
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          chmod +x ./ci/review-and-test.sh
+          ./ci/review-and-test.sh generate-tests
+
+      - name: Run Generated Tests
+        run: pnpm test
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-generation-results
+          path: test-results.json
+
+  # ──────────────────────────────────────────────
+  # Job 3: Quality Gate (depends on review)
+  # ──────────────────────────────────────────────
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [code-review, test-generation]
+    if: always()
+
+    steps:
+      - name: Check Review Results
+        run: |
+          RECOMMENDATION="${{ needs.code-review.outputs.recommendation }}"
+          CRITICAL_COUNT="${{ needs.code-review.outputs.critical-count }}"
+
+          echo "Review recommendation: $RECOMMENDATION"
+          echo "Critical issues: $CRITICAL_COUNT"
+
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "FAILED: $CRITICAL_COUNT critical issue(s) found in code review."
+            exit 1
+          fi
+
+          if [ "$RECOMMENDATION" = "request_changes" ]; then
+            echo "WARNING: Review recommends changes, but no critical issues."
+            echo "Proceeding with warning."
+          fi
+
+          echo "Quality gate passed."

@@ -1,0 +1,25 @@
+{
+  "_comment": "Example user-scoped MCP config. In practice, this content lives in ~/.claude.json",
+  "_comment2": "These servers are personal and not shared with the team.",
+  "mcpServers": {
+    "personal-notes": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-obsidian"],
+      "env": {
+        "VAULT_PATH": "${HOME}/Documents/ObsidianVault"
+      }
+    },
+    "experimental-ai": {
+      "command": "node",
+      "args": ["${HOME}/projects/my-mcp-server/index.js"],
+      "env": {
+        "API_KEY": "${MY_EXPERIMENTAL_API_KEY}"
+      }
+    },
+    "local-filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/Documents"],
+      "env": {}
+    }
+  }
+}

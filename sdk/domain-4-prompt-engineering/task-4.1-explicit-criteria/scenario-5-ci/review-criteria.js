@@ -1,0 +1,302 @@
+/**
+ * Scenario 5 (CI/CD) -- Full Review Criteria Implementation
+ *
+ * Exam relevance:
+ * - Task 4.1: Explicit criteria with severity levels and skip rules
+ * - detected_pattern enables per-category false positive tracking
+ * - SKIP_PATTERNS allows temporarily disabling high false-positive categories
+ * - Confidence threshold filters low-confidence findings
+ *
+ * This module defines the complete review criteria configuration for a CI/CD
+ * pipeline, including severity definitions, skip rules, and false positive
+ * tracking infrastructure.
+ *
+ * Run: node sdk/domain-4-prompt-engineering/task-4.1-explicit-criteria/scenario-5-ci/review-criteria.js
+ */
+
+import 'dotenv/config';
+import Anthropic from '@anthropic-ai/sdk';
+import { reviewCriteriaPrompt } from '../../../../shared/prompts/review-criteria.js';
+
+// ─── Configuration ──────────────────────────────────────────────────────────
+
+const client = new Anthropic();
+const MODEL = 'claude-sonnet-4-20250514';
+
+// ─── Severity Definitions ───────────────────────────────────────────────────
+//
+// EXAM KEY CONCEPT: Each severity level has an explicit definition,
+// a merge-blocking policy, and concrete examples. This replaces vague
+// instructions like "be conservative" with measurable criteria.
+
+const SEVERITY_DEFINITIONS = {
+  critical: {
+    description: 'Security vulnerabilities or data loss risks',
+    mergePolicy: 'BLOCKS merge -- must be fixed before approval',
+    examples: [
+      'SQL injection via string concatenation',
+      'XSS from unescaped user input in HTML',
+      'Hardcoded credentials or API keys',
+      'Path traversal in file operations',
+    ],
+  },
+  high: {
+    description: 'Bugs that will cause runtime errors in production',
+    mergePolicy: 'Should fix before merge -- reviewer marks "request changes"',
+    examples: [
+      'Null/undefined access without guards',
+      'Off-by-one errors in loops or array access',
+      'Race conditions from missing await',
+      'Type mismatches causing runtime errors',
+    ],
+  },
+  medium: {
+    description: 'Logic issues or missing edge cases',
+    mergePolicy: 'Recommend fixing -- reviewer leaves comment',
+    examples: [
+      'Conditions that are always true/false',
+      'Missing error handling on API calls',
+      'Dead code paths',
+    ],
+  },
+  low: {
+    description: 'Code quality suggestions',
+    mergePolicy: 'Optional, informational only -- no merge impact',
+    examples: [
+      'Opportunity to use more descriptive variable names in complex logic',
+      'Potential performance improvement in hot paths',
+    ],
+  },
+};
+
+// ─── Skip Rules ─────────────────────────────────────────────────────────────
+//
+// EXAM KEY CONCEPT: Explicit skip rules prevent false positives on
+// low-value findings that erode developer trust.
+
+const SKIP_RULES = [
+  'Minor style preferences (semicolons, trailing commas, bracket placement)',
+  'Local variable naming that is clear in context',
+  'Import ordering',
+  'Missing JSDoc on internal (non-exported) functions',
+  'Using "any" in TypeScript for quick prototyping (unless in shared types)',
+  'Console.log statements in test files',
+  'TODO comments (tracked separately in issue tracker)',
+];
+
+// ─── Suppressed Patterns ────────────────────────────────────────────────────
+//
+// EXAM KEY CONCEPT: When a detected_pattern consistently produces false
+// positives (>30% FP rate), temporarily suppress it while improving the
+// prompt criteria. This preserves trust in high-value categories.
+
+const SUPPRESSED_PATTERNS = [
+  // 'unused-import',      // Example: suppressed due to 45% FP rate in week 3
+  // 'generic-naming',     // Example: suppressed due to 38% FP rate in week 5
+];
+
+// ─── Confidence Threshold ───────────────────────────────────────────────────
+
+const CONFIDENCE_THRESHOLD = 0.8;
+
+// ─── Review Pipeline ────────────────────────────────────────────────────────
+
+/**
+ * Run a code review with explicit criteria against the provided diff.
+ *
+ * @param {string} codeDiff - The code changes to review (unified diff format or raw code)
+ * @returns {object} Filtered findings with false positive tracking metadata
+ */
+async function reviewWithExplicitCriteria(codeDiff) {
+  console.log('Running review with explicit criteria...\n');
+
+  // ── Step 1: Send code through the review criteria prompt ────────────
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 4096,
+    messages: [
+      {
+        role: 'user',
+        content: `${reviewCriteriaPrompt}\n\n## Code to Review\n\n\`\`\`\n${codeDiff}\n\`\`\``,
+      },
+    ],
+  });
+
+  const rawText = response.content
+    .filter(b => b.type === 'text')
+    .map(b => b.text)
+    .join('\n');
+
+  // ── Step 2: Parse the structured JSON output ────────────────────────
+  let reviewResult;
+  try {
+    // Extract JSON from the response (may be wrapped in markdown code fences)
+    const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, rawText];
+    reviewResult = JSON.parse(jsonMatch[1].trim());
+  } catch (parseError) {
+    console.error('Failed to parse review output as JSON:', parseError.message);
+    console.log('Raw output:', rawText);
+    return { findings: [], summary: null, parseError: true };
+  }
+
+  // ── Step 3: Filter by confidence threshold ──────────────────────────
+  //
+  // EXAM NOTE: The criteria prompt specifies >0.8 confidence threshold.
+  // Low-confidence findings are logged for analysis but not surfaced.
+  const confidentFindings = reviewResult.findings.filter(f => {
+    if (f.confidence < CONFIDENCE_THRESHOLD) {
+      console.log(
+        `  [FILTERED] Low confidence (${f.confidence}): ${f.detected_pattern} -- ${f.issue}`
+      );
+      return false;
+    }
+    return true;
+  });
+
+  // ── Step 4: Filter suppressed patterns ──────────────────────────────
+  //
+  // EXAM KEY CONCEPT: Suppressed patterns are removed from output but
+  // logged separately for ongoing false positive analysis.
+  const activeFindings = confidentFindings.filter(f => {
+    if (SUPPRESSED_PATTERNS.includes(f.detected_pattern)) {
+      console.log(
+        `  [SUPPRESSED] Pattern "${f.detected_pattern}" is temporarily disabled`
+      );
+      return false;
+    }
+    return true;
+  });
+
+  // ── Step 5: Build tracking metadata ─────────────────────────────────
+  const patternCounts = {};
+  for (const finding of activeFindings) {
+    const pattern = finding.detected_pattern || 'unknown';
+    patternCounts[pattern] = (patternCounts[pattern] || 0) + 1;
+  }
+
+  const result = {
+    findings: activeFindings,
+    summary: {
+      ...reviewResult.summary,
+      total_after_filtering: activeFindings.length,
+      total_before_filtering: reviewResult.findings.length,
+      suppressed_count: confidentFindings.length - activeFindings.length,
+      low_confidence_count: reviewResult.findings.length - confidentFindings.length,
+    },
+    pattern_tracking: patternCounts,
+    severity_definitions: SEVERITY_DEFINITIONS,
+  };
+
+  return result;
+}
+
+/**
+ * Track false positive rates over time per detected_pattern.
+ *
+ * EXAM KEY CONCEPT: This function takes human feedback (which findings were
+ * false positives) and computes per-pattern FP rates. Patterns exceeding
+ * the threshold are candidates for suppression.
+ *
+ * @param {Array} feedbackRecords - Array of { detected_pattern, is_false_positive }
+ * @param {number} threshold - FP rate threshold for suppression (default 0.3)
+ * @returns {object} Per-pattern FP rates and suppression recommendations
+ */
+function analyzeFalsePositiveRates(feedbackRecords, threshold = 0.3) {
+  const patternStats = {};
+
+  for (const record of feedbackRecords) {
+    const pattern = record.detected_pattern;
+    if (!patternStats[pattern]) {
+      patternStats[pattern] = { total: 0, false_positives: 0 };
+    }
+    patternStats[pattern].total++;
+    if (record.is_false_positive) {
+      patternStats[pattern].false_positives++;
+    }
+  }
+
+  const analysis = {};
+  const suppressionCandidates = [];
+
+  for (const [pattern, stats] of Object.entries(patternStats)) {
+    const fpRate = stats.false_positives / stats.total;
+    analysis[pattern] = {
+      total: stats.total,
+      false_positives: stats.false_positives,
+      fp_rate: Math.round(fpRate * 100) / 100,
+      status: fpRate > threshold ? 'SUPPRESS_CANDIDATE' : 'OK',
+    };
+    if (fpRate > threshold) {
+      suppressionCandidates.push(pattern);
+    }
+  }
+
+  return {
+    per_pattern: analysis,
+    suppression_candidates: suppressionCandidates,
+    recommendation:
+      suppressionCandidates.length > 0
+        ? `Consider suppressing: ${suppressionCandidates.join(', ')}`
+        : 'All patterns within acceptable FP rate',
+  };
+}
+
+// ─── Demo Execution ─────────────────────────────────────────────────────────
+
+async function main() {
+  console.log('Task 4.1 / Scenario 5 -- CI Review with Explicit Criteria\n');
+
+  // Sample code with known issues
+  const sampleDiff = `
+// File: src/api/users.js
+
+export async function getActiveUsers(teamId) {
+  // SQL injection: string concatenation in query
+  const query = \`SELECT * FROM users WHERE team_id = '\${teamId}'\`;
+  const users = await db.query(query);
+
+  // Null access: filter could return empty array
+  const admin = users.filter(u => u.role === 'admin')[0].name;
+
+  return { admin, users };
+}
+
+export function renderProfile(user) {
+  // XSS: unescaped user input in HTML
+  return \`<div class="profile">\${user.bio}</div>\`;
+}
+
+// Style issues below (should NOT be flagged):
+// - lodash imported but unused
+import _ from 'lodash';
+
+// - Non-standard import ordering
+import { db } from '../database.js';
+import express from 'express';
+`;
+
+  // ── Run the review ──────────────────────────────────────────────────
+  const result = await reviewWithExplicitCriteria(sampleDiff);
+
+  console.log('\n--- Review Results ---');
+  console.log(JSON.stringify(result, null, 2));
+
+  // ── Demonstrate false positive tracking ─────────────────────────────
+  console.log('\n--- False Positive Rate Analysis (simulated feedback) ---');
+
+  const simulatedFeedback = [
+    { detected_pattern: 'sql-injection', is_false_positive: false },
+    { detected_pattern: 'sql-injection', is_false_positive: false },
+    { detected_pattern: 'null-access-without-guard', is_false_positive: false },
+    { detected_pattern: 'null-access-without-guard', is_false_positive: true },
+    { detected_pattern: 'xss-unescaped-input', is_false_positive: false },
+    { detected_pattern: 'unused-import', is_false_positive: true },
+    { detected_pattern: 'unused-import', is_false_positive: true },
+    { detected_pattern: 'unused-import', is_false_positive: false },
+  ];
+
+  const fpAnalysis = analyzeFalsePositiveRates(simulatedFeedback);
+  console.log(JSON.stringify(fpAnalysis, null, 2));
+}
+
+main().catch(console.error);

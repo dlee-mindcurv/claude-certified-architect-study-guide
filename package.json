@@ -1,0 +1,20 @@
+{
+  "name": "claude-certified-architect-study-guide",
+  "version": "1.0.0",
+  "description": "Claude Certified Architect - Foundations exam preparation project with working examples for all 5 domains and 6 scenarios",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test",
+    "exercise:1": "node exercises/exercise-1-multi-tool-agent/starter.js",
+    "exercise:3": "node exercises/exercise-3-data-extraction/starter.js",
+    "exercise:4": "node exercises/exercise-4-research-pipeline/starter.js"
+  },
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.0"
+  }
+}

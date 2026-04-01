@@ -1,0 +1,135 @@
+# GitHub Action: Claude Code Automated PR Review
+#
+# This workflow runs Claude Code in non-interactive mode to review
+# pull request changes and post findings as a PR comment.
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY stored as a repository secret
+#   - Claude Code available via npm
+
+name: Claude Code PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  code-review:
+    name: Automated Code Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for accurate diffs
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run Claude Code Review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Get the diff between the PR branch and base branch
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+
+          # Run Claude Code in non-interactive mode with structured output
+          claude -p "You are reviewing a pull request. Analyze the following diff and provide a structured code review.
+
+          Focus on:
+          1. Security vulnerabilities
+          2. Performance issues
+          3. Correctness and logic errors
+          4. Style and convention violations
+
+          Diff:
+          $DIFF" \
+            --output-format json \
+            --json-schema '{
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "string",
+                  "description": "Brief summary of the changes and overall quality"
+                },
+                "issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "severity": { "type": "string", "enum": ["critical", "warning", "suggestion"] },
+                      "file": { "type": "string" },
+                      "line": { "type": "number" },
+                      "description": { "type": "string" },
+                      "suggestion": { "type": "string" }
+                    },
+                    "required": ["severity", "file", "description"]
+                  }
+                },
+                "recommendation": {
+                  "type": "string",
+                  "enum": ["approve", "request_changes"]
+                }
+              },
+              "required": ["summary", "issues", "recommendation"]
+            }' > review-output.json
+
+      - name: Process and Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = JSON.parse(fs.readFileSync('review-output.json', 'utf8'));
+
+            const criticals = review.issues.filter(i => i.severity === 'critical').length;
+            const warnings = review.issues.filter(i => i.severity === 'warning').length;
+            const suggestions = review.issues.filter(i => i.severity === 'suggestion').length;
+
+            let body = `## Claude Code Review\n\n`;
+            body += `**Summary:** ${review.summary}\n\n`;
+            body += `**Recommendation:** ${review.recommendation}\n\n`;
+            body += `| Severity | Count |\n|----------|-------|\n`;
+            body += `| Critical | ${criticals} |\n`;
+            body += `| Warning | ${warnings} |\n`;
+            body += `| Suggestion | ${suggestions} |\n\n`;
+
+            if (review.issues.length > 0) {
+              body += `### Issues\n\n`;
+              for (const issue of review.issues) {
+                const emoji = issue.severity === 'critical' ? '🔴' :
+                              issue.severity === 'warning' ? '🟡' : '🔵';
+                body += `${emoji} **${issue.severity.toUpperCase()}** - \`${issue.file}\``;
+                if (issue.line) body += ` (line ${issue.line})`;
+                body += `\n${issue.description}\n`;
+                if (issue.suggestion) body += `> Suggestion: ${issue.suggestion}\n`;
+                body += `\n`;
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+      - name: Fail on Critical Issues
+        run: |
+          CRITICALS=$(cat review-output.json | jq '.issues | map(select(.severity == "critical")) | length')
+          if [ "$CRITICALS" -gt 0 ]; then
+            echo "Found $CRITICALS critical issues. Failing the check."
+            exit 1
+          fi
