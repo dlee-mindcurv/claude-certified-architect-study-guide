@@ -3,47 +3,28 @@
  *
  * Exam relevance: Task 1.6 -- Decompose Complex Tasks
  *
- * This module implements a CI-oriented code review pipeline that integrates
- * into a pull request workflow. It uses a fixed sequential pipeline (prompt
- * chain) with two stages:
+ * CI-oriented code review pipeline using query() for each decomposed task:
  *
- *   Stage 1: PER-FILE REVIEW (parallel)
- *     - Each changed file gets its own API call
- *     - Focuses on single-file concerns: logic errors, style, edge cases
- *     - Files are reviewed in parallel for minimal latency
+ *   Stage 1: PER-FILE REVIEW (parallel query() calls)
+ *     - Each changed file gets its own query() call
+ *     - Focuses on single-file concerns: bugs, security, edge cases
  *
  *   Stage 2: CROSS-FILE INTEGRATION (sequential, depends on Stage 1)
  *     - Receives condensed per-file results
- *     - Looks for cross-cutting issues: API consistency, shared state,
- *       import chains, breaking changes
+ *     - Looks for cross-cutting issues
  *
- * The output is structured for posting as PR review comments.
- *
- * KEY EXAM CONCEPT:
+ * EXAM KEY CONCEPT:
  *   Per-file review prevents attention dilution. In a 10-file PR, sending
- *   all diffs in one prompt causes Claude to focus on the most prominent
- *   changes and skim the rest. Per-file passes guarantee each file receives
- *   full attention depth. The integration pass then works on condensed
- *   summaries rather than raw diffs.
+ *   all diffs in one prompt causes Claude to skim. Per-file passes guarantee
+ *   each file receives full attention depth.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
-
-const client = new Anthropic();
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 // ─── CI Configuration ───────────────────────────────────────────────────────
 
-/**
- * Configuration for the CI review pipeline.
- * In production, these values come from the CI environment.
- */
 const CI_CONFIG = {
-  model: 'claude-sonnet-4-20250514',
-  maxTokensPerFile: 1024,
-  maxTokensIntegration: 2048,
-  // Files larger than this threshold are split into chunks
-  maxDiffLinesPerChunk: 500,
-  // Severity levels that block merge
+  maxTurns: 1,
   blockingSeverities: ['critical', 'security'],
 };
 
@@ -57,7 +38,7 @@ const samplePR = {
       filename: 'src/models/notification-preference.js',
       status: 'added',
       diff: `
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,20 @@
 +import mongoose from 'mongoose';
 +
 +const notificationPreferenceSchema = new mongoose.Schema({
@@ -65,15 +46,9 @@ const samplePR = {
 +  email: { type: Boolean, default: true },
 +  push: { type: Boolean, default: true },
 +  sms: { type: Boolean, default: false },
-+  frequency: {
-+    type: String,
-+    enum: ['immediate', 'hourly', 'daily'],
-+    default: 'immediate',
-+  },
++  frequency: { type: String, enum: ['immediate', 'hourly', 'daily'], default: 'immediate' },
 +  quietHoursStart: { type: Number, min: 0, max: 23 },
 +  quietHoursEnd: { type: Number, min: 0, max: 23 },
-+  createdAt: { type: Date, default: Date.now },
-+  updatedAt: { type: Date, default: Date.now },
 +});
 +
 +// Missing: unique index on userId
@@ -85,7 +60,7 @@ const samplePR = {
       filename: 'src/api/notification-preferences.js',
       status: 'added',
       diff: `
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,25 @@
 +import express from 'express';
 +import NotificationPreference from '../models/notification-preference.js';
 +import { requireAuth } from '../middleware/auth.js';
@@ -94,9 +69,7 @@ const samplePR = {
 +
 +router.get('/', requireAuth, async (req, res) => {
 +  const prefs = await NotificationPreference.findOne({ userId: req.user.id });
-+  if (!prefs) {
-+    return res.json({ email: true, push: true, sms: false, frequency: 'immediate' });
-+  }
++  if (!prefs) return res.json({ email: true, push: true, sms: false, frequency: 'immediate' });
 +  res.json(prefs);
 +});
 +
@@ -110,27 +83,19 @@ const samplePR = {
 +  res.json(prefs);
 +});
 +
-+router.delete('/', requireAuth, async (req, res) => {
-+  await NotificationPreference.deleteOne({ userId: req.user.id });
-+  res.status(204).send();
-+});
-+
 +export default router;`,
     },
     {
       filename: 'src/services/notification-dispatcher.js',
       status: 'added',
       diff: `
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,30 @@
 +import NotificationPreference from '../models/notification-preference.js';
 +import { sendEmail } from './email-service.js';
 +import { sendPush } from './push-service.js';
-+import { sendSMS } from './sms-service.js';
 +
 +export async function dispatchNotification(userId, notification) {
 +  const prefs = await NotificationPreference.findOne({ userId });
-+
-+  // Default to all channels if no preferences set
 +  const channels = prefs || { email: true, push: true, sms: false };
 +
 +  const dispatched = [];
@@ -141,19 +106,12 @@ const samplePR = {
 +  }
 +
 +  if (channels.push) {
-+    // No quiet hours check here -- should respect quietHoursStart/End
++    // No quiet hours check here
 +    await sendPush(userId, notification);
 +    dispatched.push('push');
 +  }
 +
-+  if (channels.sms) {
-+    await sendSMS(userId, notification);
-+    dispatched.push('sms');
-+  }
-+
-+  // No error handling -- if one channel fails, the others still send,
-+  // but the function throws and the caller may think nothing was sent
-+
++  // No error handling -- if one channel fails, function throws
 +  return { dispatched, timestamp: new Date().toISOString() };
 +}`,
     },
@@ -167,10 +125,7 @@ const samplePR = {
 
 +  // Notify customer of status change
 +  const { dispatchNotification } = await import('../services/notification-dispatcher.js');
-+  await dispatchNotification(order.userId, {
-+    type: 'order_status',
-+    message: \`Your order \${order._id} is now \${req.body.status}\`,
-+  });
++  await dispatchNotification(order.userId, { type: 'order_status', message: 'Status updated' });
 +
    res.json(order);
  });`,
@@ -181,190 +136,104 @@ const samplePR = {
 // ─── Stage 1: Per-File Review ───────────────────────────────────────────────
 
 const PER_FILE_PROMPT = `You are an automated code reviewer in a CI pipeline. Review the given file diff.
-
-Focus on:
-1. **Bugs:** Logic errors, null/undefined risks, race conditions
-2. **Security:** Input validation gaps, injection risks, auth bypasses
-3. **Edge cases:** Missing error handling, boundary conditions
-4. **Style:** Naming, consistency with surrounding code patterns
-5. **Performance:** N+1 queries, unnecessary allocations, missing indices
-
-Return JSON:
-{
+Focus on: bugs, security, edge cases, style, performance.
+Return JSON: {
   "filename": "<file>",
-  "status": "<added|modified|deleted>",
-  "issues": [
-    {
-      "severity": "critical|high|medium|low",
-      "category": "bug|security|edge-case|style|performance",
-      "line": "<approximate line or range>",
-      "description": "<what's wrong>",
-      "suggestion": "<how to fix>"
-    }
-  ],
+  "issues": [{ "severity": "critical|high|medium|low", "category": "bug|security|edge-case|style|performance", "line": "<line>", "description": "<what>", "suggestion": "<fix>" }],
   "summary": "<one sentence>",
   "approvalStatus": "approve|request_changes|comment"
 }`;
 
-/**
- * Review a single file.
- *
- * Each file gets its own API call with ONLY that file's diff. This prevents
- * attention dilution: the model's full capacity is applied to this one file.
- */
 async function reviewFile(file) {
-  const response = await client.messages.create({
-    model: CI_CONFIG.model,
-    max_tokens: CI_CONFIG.maxTokensPerFile,
-    system: PER_FILE_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content:
-          `File: ${file.filename}\n` +
-          `Status: ${file.status}\n\n` +
-          `Diff:\n${file.diff}`,
-      },
-    ],
-  });
+  let result = '{}';
 
-  const text = response.content.find((b) => b.type === 'text')?.text ?? '{}';
+  for await (const message of query({
+    prompt: `File: ${file.filename}\nStatus: ${file.status}\n\nDiff:\n${file.diff}`,
+    options: {
+      systemPrompt: PER_FILE_PROMPT,
+      maxTurns: CI_CONFIG.maxTurns,
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      result = message.result;
+    }
+  }
 
   try {
-    return JSON.parse(text);
+    return JSON.parse(result);
   } catch {
-    return {
-      filename: file.filename,
-      issues: [],
-      summary: text,
-      approvalStatus: 'comment',
-      parseError: true,
-    };
+    return { filename: file.filename, issues: [], summary: result, approvalStatus: 'comment' };
   }
 }
 
 /**
  * Run per-file reviews in parallel.
- *
- * All files are reviewed concurrently. Each call is independent, so
- * parallelism reduces total wall-clock time from O(n * latency) to
- * O(latency) (bounded by the slowest single review).
+ * All query() calls are independent -- Promise.all reduces wall-clock time.
  */
 async function runPerFileReviews(files) {
   console.log(`\n--- Stage 1: Per-File Review (${files.length} files) ---\n`);
-
   const reviews = await Promise.all(files.map(reviewFile));
-
   for (const review of reviews) {
-    const issueCount = review.issues?.length ?? 0;
-    const status = review.approvalStatus ?? 'unknown';
-    console.log(`  ${review.filename}: ${issueCount} issues [${status}]`);
+    console.log(`  ${review.filename}: ${review.issues?.length ?? 0} issues [${review.approvalStatus ?? 'unknown'}]`);
   }
-
   return reviews;
 }
 
 // ─── Stage 2: Cross-File Integration ────────────────────────────────────────
 
 const INTEGRATION_PROMPT = `You are performing a cross-file integration review for a CI pipeline.
-You have per-file review results. Now look for issues that span multiple files:
-
-1. **API consistency:** Do related endpoints follow the same patterns?
-2. **Data flow:** Is data passed correctly between modules (models, services, routes)?
-3. **Missing coordination:** Should a change in one file have a corresponding change elsewhere?
-4. **Error propagation:** Do errors flow correctly across module boundaries?
-5. **Schema/contract mismatches:** Do callers pass what callees expect?
-
-Return JSON:
-{
-  "crossFileIssues": [
-    {
-      "severity": "critical|high|medium|low",
-      "category": "consistency|data-flow|coordination|error-propagation|contract",
-      "filesInvolved": ["file1.js", "file2.js"],
-      "description": "<what's wrong>",
-      "suggestion": "<how to fix>"
-    }
-  ],
+Look for: API consistency, data flow, missing coordination, error propagation, contract mismatches.
+Return JSON: {
+  "crossFileIssues": [{ "severity": "critical|high|medium|low", "filesInvolved": ["file1.js"], "description": "<what>", "suggestion": "<fix>" }],
   "overallVerdict": "approve|request_changes|block",
-  "blockingIssues": ["<list of issues that must be fixed before merge>"],
-  "summary": "<PR-level summary>"
+  "summary": "<PR summary>"
 }`;
 
-/**
- * Cross-file integration review.
- *
- * Receives condensed per-file results (summaries and issue lists), not raw
- * diffs. This keeps the context focused on cross-cutting concerns.
- */
 async function runIntegrationReview(perFileReviews, prMetadata) {
   console.log('\n--- Stage 2: Cross-File Integration ---\n');
 
-  const response = await client.messages.create({
-    model: CI_CONFIG.model,
-    max_tokens: CI_CONFIG.maxTokensIntegration,
-    system: INTEGRATION_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content:
-          `PR #${prMetadata.number}: ${prMetadata.title}\n\n` +
-          `Per-file review results:\n` +
-          JSON.stringify(perFileReviews, null, 2),
-      },
-    ],
-  });
+  let result = '{}';
 
-  const text = response.content.find((b) => b.type === 'text')?.text ?? '{}';
+  for await (const message of query({
+    prompt: `PR #${prMetadata.number}: ${prMetadata.title}\n\nPer-file review results:\n${JSON.stringify(perFileReviews, null, 2)}`,
+    options: {
+      systemPrompt: INTEGRATION_PROMPT,
+      maxTurns: CI_CONFIG.maxTurns,
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      result = message.result;
+    }
+  }
 
   try {
-    const result = JSON.parse(text);
-    console.log(`  Cross-file issues: ${result.crossFileIssues?.length ?? 0}`);
-    console.log(`  Verdict: ${result.overallVerdict}`);
-    return result;
+    const parsed = JSON.parse(result);
+    console.log(`  Cross-file issues: ${parsed.crossFileIssues?.length ?? 0}`);
+    console.log(`  Verdict: ${parsed.overallVerdict}`);
+    return parsed;
   } catch {
-    return {
-      crossFileIssues: [],
-      overallVerdict: 'comment',
-      summary: text,
-    };
+    return { crossFileIssues: [], overallVerdict: 'comment', summary: result };
   }
 }
 
 // ─── CI Pipeline Orchestrator ───────────────────────────────────────────────
 
-/**
- * Run the complete CI review pipeline for a pull request.
- *
- * Returns a structured review result suitable for posting to the PR.
- */
 async function reviewPullRequest(pr) {
   console.log(`=== CI Review: PR #${pr.number} -- ${pr.title} ===`);
   console.log(`Files changed: ${pr.files.length}`);
 
-  // Stage 1: Per-file reviews (parallel)
   const perFileReviews = await runPerFileReviews(pr.files);
-
-  // Stage 2: Cross-file integration (depends on Stage 1)
   const integrationReview = await runIntegrationReview(perFileReviews, {
     number: pr.number,
     title: pr.title,
   });
 
-  // Aggregate results for CI decision
   const allIssues = [
-    ...perFileReviews.flatMap((r) => (r.issues ?? []).map((i) => ({
-      ...i,
-      source: 'per-file',
-      file: r.filename,
-    }))),
-    ...(integrationReview.crossFileIssues ?? []).map((i) => ({
-      ...i,
-      source: 'cross-file',
-    })),
+    ...perFileReviews.flatMap(r => (r.issues ?? []).map(i => ({ ...i, source: 'per-file', file: r.filename }))),
+    ...(integrationReview.crossFileIssues ?? []).map(i => ({ ...i, source: 'cross-file' })),
   ];
 
-  const blockingIssues = allIssues.filter((i) =>
+  const blockingIssues = allIssues.filter(i =>
     CI_CONFIG.blockingSeverities.includes(i.severity) ||
     CI_CONFIG.blockingSeverities.includes(i.category)
   );
@@ -376,7 +245,6 @@ async function reviewPullRequest(pr) {
     shouldBlock: blockingIssues.length > 0,
     perFileReviews,
     integrationReview,
-    allIssues,
   };
 
   console.log(`\n=== CI Result ===`);
@@ -389,64 +257,25 @@ async function reviewPullRequest(pr) {
 
 // ─── PR Comment Formatter ───────────────────────────────────────────────────
 
-/**
- * Format the review result as a Markdown comment for posting to the PR.
- */
 function formatPRComment(ciResult) {
   const lines = [];
-
   lines.push(`## Automated Code Review -- PR #${ciResult.pr.number}`);
   lines.push('');
-
-  if (ciResult.shouldBlock) {
-    lines.push('**Status: Changes Requested**');
-    lines.push(`Found ${ciResult.blockingIssues} blocking issue(s) that must be resolved before merge.`);
-  } else {
-    lines.push('**Status: Approved**');
-    lines.push(`Found ${ciResult.totalIssues} issue(s), none blocking.`);
-  }
-
+  lines.push(ciResult.shouldBlock
+    ? `**Status: Changes Requested** (${ciResult.blockingIssues} blocking)`
+    : `**Status: Approved** (${ciResult.totalIssues} issues, none blocking)`
+  );
   lines.push('');
   lines.push('### Per-File Results');
-  lines.push('');
-
   for (const review of ciResult.perFileReviews) {
-    const icon = review.approvalStatus === 'approve' ? 'pass' : 'warn';
-    lines.push(`- **${review.filename}** [${icon}]: ${review.summary}`);
+    lines.push(`- **${review.filename}** [${review.approvalStatus}]: ${review.summary}`);
   }
-
-  if (ciResult.integrationReview.crossFileIssues?.length > 0) {
-    lines.push('');
-    lines.push('### Cross-File Issues');
-    lines.push('');
-    for (const issue of ciResult.integrationReview.crossFileIssues) {
-      lines.push(`- **[${issue.severity}]** ${issue.description}`);
-      lines.push(`  Files: ${issue.filesInvolved?.join(', ')}`);
-    }
-  }
-
   return lines.join('\n');
 }
 
-// ─── Demo ───────────────────────────────────────────────────────────────────
+// ─── Run ────────────────────────────────────────────────────────────────────
 
 async function main() {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.log('Set ANTHROPIC_API_KEY to run this example.\n');
-    console.log('This CI pipeline reviews a PR with 4 files using two stages:');
-    console.log('  Stage 1: Per-file review (4 parallel API calls)');
-    console.log('  Stage 2: Cross-file integration (1 API call)\n');
-    console.log('Expected per-file findings:');
-    console.log('  - notification-preference.js: Missing unique index on userId, no updatedAt hook');
-    console.log('  - notification-preferences.js: No input validation, mass assignment vulnerability');
-    console.log('  - notification-dispatcher.js: No quiet hours check, poor error handling');
-    console.log('  - orders.js: Dynamic import in request handler, no error handling on dispatch\n');
-    console.log('Expected cross-file finding:');
-    console.log('  - Dispatcher does not check quiet hours despite model defining them');
-    console.log('  - Orders.js dispatches notifications but does not handle dispatch failures');
-    return;
-  }
-
   const result = await reviewPullRequest(samplePR);
   console.log('\n--- PR Comment ---\n');
   console.log(formatPRComment(result));
@@ -454,14 +283,4 @@ async function main() {
 
 main().catch(console.error);
 
-// ─── Exports ────────────────────────────────────────────────────────────────
-
-export {
-  reviewFile,
-  runPerFileReviews,
-  runIntegrationReview,
-  reviewPullRequest,
-  formatPRComment,
-  samplePR,
-  CI_CONFIG,
-};
+export { reviewFile, runPerFileReviews, runIntegrationReview, reviewPullRequest, formatPRComment, samplePR, CI_CONFIG };

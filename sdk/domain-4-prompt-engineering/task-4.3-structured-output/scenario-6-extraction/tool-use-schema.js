@@ -7,18 +7,12 @@
  * - Self-correction: stated_value vs calculated_value with conflict_detected
  * - Confidence scores for human review routing (Task 5.5)
  *
- * This module defines the complete tool set for the data extraction pipeline.
- * It demonstrates all the schema design patterns tested on the exam:
- * 1. Forced tool selection for guaranteed output
- * 2. Nullable fields for absent information
- * 3. Enum with "other" escape hatch
- * 4. Self-correction validation fields
- * 5. Confidence scores per field
+ * This is an API-level concept -- uses @anthropic-ai/sdk directly for
+ * forced tool selection and two-phase extraction.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.3-structured-output/scenario-6-extraction/tool-use-schema.js
  */
 
-import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import {
   documentExtractionTool,
@@ -38,41 +32,15 @@ const MODEL = 'claude-sonnet-4-20250514';
 
 // ─── Schema Design Walkthrough ──────────────────────────────────────────────
 //
-// EXAM KEY CONCEPT: The documentExtractionTool schema (from shared/schemas)
-// demonstrates all schema design patterns:
+// EXAM KEY CONCEPT: The documentExtractionTool schema demonstrates:
 //
-// 1. REQUIRED FIELDS (must always be present):
-//    - document_id: correlation key
-//    - document_type: routing key for downstream processing
-//    - field_confidence: quality signal for human review
-//
-// 2. NULLABLE FIELDS (may be absent from source):
-//    - title: type ["string", "null"] -- null if no title in source
-//    - author: type ["string", "null"] -- null for unsigned documents
-//    - date: type ["string", "null"] -- null if undated
-//    - document_type_detail: type ["string", "null"] -- only for "other" type
-//    - extraction_notes: type ["string", "null"] -- null if no issues
-//
-// 3. ENUM WITH "OTHER" ESCAPE HATCH:
-//    document_type: enum ["invoice", "contract", ..., "other"]
-//    + document_type_detail for "other" subcategorization
-//
-// 4. SELF-CORRECTION VALIDATION:
-//    monetary_values[].stated_value vs calculated_value + conflict_detected
-//    Claude computes both independently and flags mismatches
-//
-// 5. CONFIDENCE SCORES:
-//    field_confidence: { [field]: number 0-1 }
-//    Enables routing: high confidence -> auto-process, low -> human review
+// 1. REQUIRED FIELDS: document_id, document_type, field_confidence
+// 2. NULLABLE FIELDS: title, author, date (type: ["string", "null"])
+// 3. ENUM WITH "OTHER": document_type enum with "other" + document_type_detail
+// 4. SELF-CORRECTION: stated_value vs calculated_value + conflict_detected
+// 5. CONFIDENCE SCORES: field_confidence for human review routing
 
 // ─── Two-Phase Extraction Pipeline ──────────────────────────────────────────
-//
-// Phase 1: Metadata extraction (document type classification)
-// Phase 2: Detailed extraction using the document-type-specific approach
-//
-// This two-phase approach is more reliable than single-pass because:
-// - Phase 1 uses a simpler schema (fewer fields to get wrong)
-// - Phase 2 receives the document type as context (better extraction)
 
 /**
  * Phase 1: Extract document metadata (type, title, date).
@@ -84,7 +52,6 @@ async function extractMetadata(documentId) {
     return { error: `Document not found: ${documentId}` };
   }
 
-  // ── Simplified metadata tool ──────────────────────────────────────
   const metadataTool = {
     name: 'classify_document',
     description:
@@ -114,7 +81,6 @@ async function extractMetadata(documentId) {
     model: MODEL,
     max_tokens: 1024,
     // ── FORCED TOOL SELECTION ─────────────────────────────────────────
-    // Guarantees structured output -- Claude MUST call this tool
     tools: [metadataTool],
     tool_choice: { type: 'tool', name: 'classify_document' },
     messages: [
@@ -170,24 +136,13 @@ Rules:
 
 // ─── Validation ─────────────────────────────────────────────────────────────
 
-/**
- * Validate an extraction result against the schema and business rules.
- *
- * EXAM KEY CONCEPT: tool_use guarantees schema compliance (syntax), but we
- * still need to validate semantic correctness. This function checks for:
- * - Required fields present
- * - Confidence scores in valid range
- * - Conflict detection flagged correctly
- */
 function validateExtraction(extraction) {
   const errors = [];
 
-  // Required fields
   if (!extraction.document_id) errors.push('Missing document_id');
   if (!extraction.document_type) errors.push('Missing document_type');
   if (!extraction.field_confidence) errors.push('Missing field_confidence');
 
-  // Confidence range
   if (extraction.field_confidence) {
     for (const [field, score] of Object.entries(extraction.field_confidence)) {
       if (score < 0 || score > 1) {
@@ -196,7 +151,6 @@ function validateExtraction(extraction) {
     }
   }
 
-  // Conflict detection consistency
   if (extraction.monetary_values) {
     for (const mv of extraction.monetary_values) {
       if (mv.stated_value !== undefined && mv.calculated_value !== undefined) {

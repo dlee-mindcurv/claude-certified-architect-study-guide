@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm info:*)",
+      "Bash(npm install:*)",
+      "Bash(ls node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts)",
+      "Bash(for f:*)",
+      "Bash(do test:*)",
+      "Bash(echo \"  OK: $f\")",
+      "Bash(echo \"  MISSING: $f\")",
+      "Bash(done)",
+      "Bash(do node:*)",
+      "Bash(echo \"OK: $f\")",
+      "Bash(echo \"FAIL: $f\")",
+      "Bash(while read:*)",
+      "Bash(FAILS=0)"
+    ]
+  }
+}

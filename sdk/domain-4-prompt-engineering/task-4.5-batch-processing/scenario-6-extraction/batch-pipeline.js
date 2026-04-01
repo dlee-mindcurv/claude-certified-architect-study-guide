@@ -9,18 +9,11 @@
  * - Failure handling: resubmit only failed documents
  * - SLA: pipeline_window + 24h batch_max = total guarantee
  *
- * This module implements the complete batch extraction pipeline:
- * 1. Build extraction requests for all documents
- * 2. Submit as a single batch
- * 3. Poll for completion
- * 4. Process and validate results
- * 5. Resubmit failures
- * 6. Generate pipeline report with SLA analysis
+ * Uses @anthropic-ai/sdk directly -- the batch API is not in the Agent SDK.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.5-batch-processing/scenario-6-extraction/batch-pipeline.js
  */
 
-import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../../shared/schemas/extraction-output.js';
 import { getDocumentIds, getDocument } from '../../../../shared/tools/extraction-tools.js';
@@ -31,17 +24,14 @@ const client = new Anthropic();
 const MODEL = 'claude-sonnet-4-20250514';
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_POLL_WAIT_MS = 300000; // 5 minutes for demo; production would be longer
-const REALTIME_RETRY_THRESHOLD = 3; // Use real-time API if <= this many failures
+const MAX_POLL_WAIT_MS = 300000;
+const REALTIME_RETRY_THRESHOLD = 3;
 
 // ─── Phase 1: Build Batch Requests ──────────────────────────────────────────
 
 /**
- * Build batch requests for all documents in the extraction pipeline.
- *
  * EXAM KEY CONCEPT: Each request has a custom_id that is returned in results.
  * This is the ONLY way to correlate batch results to source documents.
- * The API does not enforce uniqueness -- that is your responsibility.
  */
 function buildBatchRequests() {
   const documentIds = getDocumentIds();
@@ -53,7 +43,6 @@ function buildBatchRequests() {
     if (!doc) continue;
 
     requests.push({
-      // ── custom_id: includes doc ID, type hint, and timestamp ────
       custom_id: `extract-${docId}-${batchTimestamp}`,
       params: {
         model: MODEL,
@@ -146,7 +135,6 @@ async function collectResults(batchId) {
 
   for await (const result of client.messages.batches.results(batchId)) {
     const customId = result.custom_id;
-    // Extract the document ID from custom_id
     const docIdMatch = customId.match(/^extract-(.+?)-\d{4}/);
     const docId = docIdMatch ? docIdMatch[1] : customId;
 
@@ -156,13 +144,11 @@ async function collectResults(batchId) {
         const toolUse = message.content.find(b => b.type === 'tool_use');
         const extraction = toolUse ? toolUse.input : null;
 
-        // ── Basic validation ────────────────────────────────────────
         const validationIssues = [];
         if (extraction) {
           if (!extraction.document_type) validationIssues.push('missing document_type');
           if (!extraction.field_confidence) validationIssues.push('missing field_confidence');
 
-          // Check conflict detection
           if (extraction.monetary_values) {
             for (const mv of extraction.monetary_values) {
               if (mv.stated_value != null && mv.calculated_value != null) {
@@ -213,13 +199,6 @@ async function collectResults(batchId) {
 
 // ─── Phase 5: Resubmit Failures ────────────────────────────────────────────
 
-/**
- * Resubmit failed extractions.
- *
- * EXAM KEY CONCEPT: Resubmit ONLY the failed items.
- * - For small failure counts: use real-time API (no batch overhead)
- * - For large failure counts: submit a new batch
- */
 async function resubmitFailures(failedItems, originalRequests) {
   if (failedItems.length === 0) return [];
 
@@ -229,7 +208,6 @@ async function resubmitFailures(failedItems, originalRequests) {
   const failedRequests = originalRequests.filter(r => failedCustomIds.has(r.custom_id));
 
   if (failedItems.length <= REALTIME_RETRY_THRESHOLD) {
-    // ── Real-time retry for small failure counts ──────────────────
     console.log('  Using real-time API (small failure count)\n');
     const retryResults = [];
 
@@ -258,7 +236,6 @@ async function resubmitFailures(failedItems, originalRequests) {
     return retryResults;
   }
 
-  // ── Batch retry for large failure counts ────────────────────────
   console.log('  Submitting retry batch\n');
   const retryBatch = await submitBatch(failedRequests);
   const completion = await waitForCompletion(retryBatch.id);
@@ -293,7 +270,6 @@ Retried:                 ${retryResults.length}
 Processing time:         ${Math.round(elapsedMs / 1000)}s
 `);
 
-  // ── Conflict Detection Summary ──────────────────────────────────
   const conflictsFound = results.succeeded
     .filter(r => r.extraction?.monetary_values?.some(mv => mv.conflict_detected))
     .map(r => ({
@@ -311,10 +287,9 @@ Processing time:         ${Math.round(elapsedMs / 1000)}s
     console.log();
   }
 
-  // ── SLA Analysis ────────────────────────────────────────────────
   console.log('SLA Analysis:');
   const batchMaxHours = 24;
-  const processingWindowHours = 4; // Assumed pipeline window
+  const processingWindowHours = 4;
 
   console.log(`  Actual processing time:      ${Math.round(elapsedMs / 1000 / 60)} minutes`);
   console.log(`  Batch API max latency:       ${batchMaxHours} hours`);

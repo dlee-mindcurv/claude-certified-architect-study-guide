@@ -3,32 +3,23 @@
  *
  * Exam relevance:
  * - Self-review has limitations (model retains reasoning context)
- * - Independent review instances (separate API calls) are more effective
+ * - Independent review instances (separate query() calls) are more effective
  * - Multi-pass: per-file local + cross-file integration + verification
  * - Session isolation prevents confirmation bias
  * - Scenario 5 (CI/CD) depends on this pattern
  *
- * This example demonstrates:
- * 1. Phase 1: Per-file analysis (separate API call per file)
- * 2. Phase 2: Cross-file integration (receives all per-file results)
- * 3. Phase 3: Independent verification (separate from generator)
- * 4. How session isolation improves review quality
+ * Uses Agent SDK query() for session isolation -- each query() call is an
+ * independent session with no shared context.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.6-multi-pass-review/example.js
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import {
   reviewCriteriaPrompt,
   perFileReviewPrompt,
   crossFileReviewPrompt,
 } from '../../../shared/prompts/review-criteria.js';
-
-// ─── Configuration ──────────────────────────────────────────────────────────
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
 
 // ─── Sample PR Files ────────────────────────────────────────────────────────
 
@@ -102,9 +93,8 @@ export function sanitizeHtml(html) {
 
 // ─── Phase 1: Per-File Local Analysis ───────────────────────────────────────
 //
-// EXAM KEY CONCEPT: Each file is reviewed in a SEPARATE API call.
-// This ensures each file gets full attention and enables parallelization.
-// Per-file analysis focuses on LOCAL issues only -- no cross-file concerns.
+// EXAM KEY CONCEPT: Each file is reviewed in a SEPARATE query() call.
+// This ensures session isolation per file and enables parallelization.
 
 async function phase1PerFileAnalysis(files) {
   console.log('Phase 1: Per-File Local Analysis');
@@ -112,18 +102,12 @@ async function phase1PerFileAnalysis(files) {
 
   const perFileResults = {};
 
-  // ── Review each file in a separate API call ─────────────────────
-  // EXAM KEY CONCEPT: Separate calls = session isolation per file
+  // ── Review each file in a separate query() call ────────────────────
+  // EXAM KEY CONCEPT: Separate query() calls = session isolation per file
   const reviewPromises = Object.entries(files).map(async ([filePath, content]) => {
     console.log(`  Reviewing: ${filePath}`);
 
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      messages: [
-        {
-          role: 'user',
-          content: `${perFileReviewPrompt}
+    const prompt = `${perFileReviewPrompt}
 
 ## File: ${filePath}
 
@@ -131,16 +115,17 @@ async function phase1PerFileAnalysis(files) {
 ${content}
 \`\`\`
 
-Return findings as JSON: { "findings": [...], "file": "${filePath}" }`,
-        },
-      ],
-    });
+Return findings as JSON: { "findings": [...], "file": "${filePath}" }`;
 
-    const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    let resultText = '';
+    for await (const message of query({ prompt })) {
+      if (message.type === 'result' && message.subtype === 'success') {
+        resultText = message.result;
+      }
+    }
 
-    // Parse JSON from response
     try {
-      const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+      const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
       const result = JSON.parse(jsonMatch[1].trim());
       perFileResults[filePath] = result;
       console.log(`  Found ${result.findings?.length || 0} issues in ${filePath}`);
@@ -159,14 +144,12 @@ Return findings as JSON: { "findings": [...], "file": "${filePath}" }`,
 // ─── Phase 2: Cross-File Integration Pass ───────────────────────────────────
 //
 // EXAM KEY CONCEPT: This pass receives per-file results (not raw code) and
-// focuses on issues that span file boundaries. It sees the full picture
-// of all changes, which individual per-file reviews cannot.
+// focuses on issues that span file boundaries.
 
 async function phase2CrossFileAnalysis(perFileResults, files) {
   console.log('\nPhase 2: Cross-File Integration Analysis');
   console.log('─'.repeat(40));
 
-  // Format per-file results for the cross-file prompt
   const perFileResultsText = Object.entries(perFileResults)
     .map(([file, result]) => {
       const findings = result.findings || [];
@@ -174,19 +157,11 @@ async function phase2CrossFileAnalysis(perFileResults, files) {
     })
     .join('\n\n');
 
-  // Build the cross-file prompt with per-file results injected
-  const prompt = crossFileReviewPrompt.replace('{{per_file_results}}', perFileResultsText);
+  const prompt_text = crossFileReviewPrompt.replace('{{per_file_results}}', perFileResultsText);
 
-  // List of modified files for context
   const fileList = Object.keys(files).join('\n');
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2048,
-    messages: [
-      {
-        role: 'user',
-        content: `${prompt}
+  const prompt = `${prompt_text}
 
 ## Modified Files
 ${fileList}
@@ -194,15 +169,17 @@ ${fileList}
 ## File Contents
 ${Object.entries(files).map(([f, c]) => `### ${f}\n\`\`\`javascript\n${c}\n\`\`\``).join('\n\n')}
 
-Return ONLY cross-file findings as JSON: { "cross_file_findings": [...] }`,
-      },
-    ],
-  });
+Return ONLY cross-file findings as JSON: { "cross_file_findings": [...] }`;
 
-  const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
 
   try {
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+    const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
     const result = JSON.parse(jsonMatch[1].trim());
     console.log(`  Found ${result.cross_file_findings?.length || 0} cross-file issues`);
     return result;
@@ -215,26 +192,17 @@ Return ONLY cross-file findings as JSON: { "cross_file_findings": [...] }`,
 // ─── Phase 3: Independent Verification ──────────────────────────────────────
 //
 // EXAM KEY CONCEPT: This verification pass is INDEPENDENT -- it has no
-// access to the reasoning that produced the findings. It receives only
-// the findings and the original code, evaluating each finding on its
-// own merits. This is analogous to a fresh pair of eyes reviewing the work.
+// access to the reasoning that produced the findings. This is the session
+// isolation principle applied via separate query() calls.
 
 async function phase3Verification(allFindings, files) {
   console.log('\nPhase 3: Independent Verification');
   console.log('─'.repeat(40));
-  console.log('  (Separate API call -- no shared context with Phases 1-2)');
+  console.log('  (Separate query() call -- no shared context with Phases 1-2)');
 
   const findingsText = JSON.stringify(allFindings, null, 2);
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2048,
-    // ── SEPARATE API CALL: No conversation history from Phases 1-2 ───
-    // This is the session isolation principle in action.
-    messages: [
-      {
-        role: 'user',
-        content: `You are an independent code review verifier. You have NOT seen these findings before.
+  const prompt = `You are an independent code review verifier. You have NOT seen these findings before.
 Your job is to verify each finding against the actual code and assign a confidence score.
 
 ## Review Findings to Verify
@@ -264,15 +232,17 @@ Return JSON:
     "adjusted": N,
     "rejected": N
   }
-}`,
-      },
-    ],
-  });
+}`;
 
-  const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
 
   try {
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+    const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
     const result = JSON.parse(jsonMatch[1].trim());
     const summary = result.summary || {};
     console.log(
@@ -311,7 +281,6 @@ async function main() {
   console.log('MULTI-PASS REVIEW COMPLETE');
   console.log('='.repeat(60));
 
-  // Count findings by phase
   let totalPerFile = 0;
   for (const result of Object.values(perFileResults)) {
     totalPerFile += result.findings?.length || 0;

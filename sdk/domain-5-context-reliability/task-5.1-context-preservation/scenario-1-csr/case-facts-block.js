@@ -1,24 +1,28 @@
 /**
- * Scenario 1: CSR Case Facts Block — Complete Implementation
+ * Scenario 1: CSR Case Facts Block -- Agent SDK Implementation
  *
  * Exam relevance (Task 5.1):
  * - Persistent case facts block injected at top of system prompt each turn
  * - Incremental fact extraction after every tool call
  * - Tool result trimming to conserve context tokens
- * - Handles all CSR tool types: get_customer, lookup_order, process_refund, escalate_to_human
+ * - Case facts survive context compaction because they are rebuilt each turn
  *
- * This module is designed to be imported by an agentic loop. It does NOT
- * contain the loop itself -- it provides the context management layer.
+ * EXAM KEY CONCEPT:
+ *   This module provides the context management layer for a CSR agent.
+ *   The case facts object is maintained OUTSIDE conversation history and
+ *   re-injected into the system prompt before every API call. This places
+ *   verified data at the TOP of the context (highest-attention zone).
+ *
+ *   The module is designed to be imported by an agentic loop. It does NOT
+ *   contain the loop itself -- it provides the context management layer.
  */
 
-import { csrSystemPrompt, csrCaseFactsTemplate } from '../../../../shared/prompts/csr-system-prompt.js';
+import { csrSystemPrompt } from '../../../../shared/prompts/csr-system-prompt.js';
 
 // ─── Case Facts Data Structure ────────────────────────────────────────────────
 
 /**
- * Creates an empty case facts object.
- *
- * EXAM NOTE: This structure is maintained OUTSIDE the conversation history.
+ * EXAM KEY CONCEPT: This structure is maintained OUTSIDE conversation history.
  * It survives summarization because we re-inject it into the system prompt
  * before every API call.
  */
@@ -42,12 +46,6 @@ export function createCaseFacts() {
  * EXAM KEY CONCEPT: This runs after EVERY tool call, not just at the end.
  * Intermediate facts (like customer tier discovered during get_customer)
  * inform subsequent decisions (like whether a refund needs approval).
- *
- * @param {string} toolName - The tool that was called
- * @param {object} toolInput - The input passed to the tool
- * @param {object} rawResult - The raw tool result { content, isError? }
- * @param {object} caseFacts - The case facts to update (mutated in place)
- * @returns {object} The updated case facts
  */
 export function extractFacts(toolName, toolInput, rawResult, caseFacts) {
   caseFacts.turnCount++;
@@ -81,7 +79,6 @@ export function extractFacts(toolName, toolInput, rawResult, caseFacts) {
 }
 
 function extractCustomerFacts(data, toolInput, caseFacts) {
-  // Single customer match
   if (data.id) {
     caseFacts.customer = {
       id: data.id,
@@ -95,18 +92,11 @@ function extractCustomerFacts(data, toolInput, caseFacts) {
       detail: `${data.name} (${data.id}, ${data.tier} tier)`,
       turn: caseFacts.turnCount,
     });
-    // Remove disambiguation open issue if it existed
-    caseFacts.openIssues = caseFacts.openIssues.filter(
-      i => i.type !== 'disambiguation'
-    );
-    return caseFacts;
+    caseFacts.openIssues = caseFacts.openIssues.filter(i => i.type !== 'disambiguation');
   }
 
-  // Multiple matches -- disambiguation required
   if (data.multiple_matches) {
-    const matchSummaries = data.multiple_matches.map(
-      m => `${m.name} (${m.id}, ${m.email})`
-    );
+    const matchSummaries = data.multiple_matches.map(m => `${m.name} (${m.id}, ${m.email})`);
     caseFacts.openIssues.push({
       type: 'disambiguation',
       description: `Multiple customers match: ${matchSummaries.join('; ')}`,
@@ -118,7 +108,6 @@ function extractCustomerFacts(data, toolInput, caseFacts) {
       detail: `${data.multiple_matches.length} matches found, need disambiguation`,
       turn: caseFacts.turnCount,
     });
-    return caseFacts;
   }
 
   return caseFacts;
@@ -132,13 +121,10 @@ function extractOrderFacts(data, caseFacts) {
     status: data.status,
     deliveredAt: data.deliveredAt || null,
     trackingNumber: data.trackingNumber || null,
-    orderDate: data.orderDate || null,
     itemCount: data.items?.length || 0,
-    // Preserve item names for reference but not full details
     itemNames: data.items?.map(i => i.name) || [],
   };
 
-  // Deduplicate: update if already seen, otherwise add
   const existingIdx = caseFacts.orders.findIndex(o => o.orderId === data.orderId);
   if (existingIdx >= 0) {
     caseFacts.orders[existingIdx] = orderSummary;
@@ -162,8 +148,6 @@ function extractRefundFacts(data, caseFacts) {
     amount: data.amount,
     status: data.status,
     estimatedDays: data.estimatedProcessingDays,
-    reason: data.reason,
-    createdAt: data.createdAt,
   });
 
   caseFacts.actionsTaken.push({
@@ -172,7 +156,6 @@ function extractRefundFacts(data, caseFacts) {
     turn: caseFacts.turnCount,
   });
 
-  // If refund needs approval, add as open issue
   if (data.status === 'pending_approval') {
     caseFacts.openIssues.push({
       type: 'pending_approval',
@@ -181,11 +164,7 @@ function extractRefundFacts(data, caseFacts) {
     });
   }
 
-  // Clear refund-related open issues
-  caseFacts.openIssues = caseFacts.openIssues.filter(
-    i => i.type !== 'awaiting_refund'
-  );
-
+  caseFacts.openIssues = caseFacts.openIssues.filter(i => i.type !== 'awaiting_refund');
   return caseFacts;
 }
 
@@ -195,11 +174,10 @@ function extractEscalationFacts(data, caseFacts) {
     priority: data.priority,
     issueSummary: data.issueSummary,
     assignedTo: data.assignedTo,
-    createdAt: data.createdAt,
   });
 
   caseFacts.actionsTaken.push({
-    action: `Escalated to human agent`,
+    action: 'Escalated to human agent',
     detail: `Ticket ${data.ticketId} (${data.priority} priority)`,
     turn: caseFacts.turnCount,
   });
@@ -210,17 +188,13 @@ function extractEscalationFacts(data, caseFacts) {
 // ─── Case Facts Rendering ─────────────────────────────────────────────────────
 
 /**
- * Render the case facts into a markdown block for system prompt injection.
- *
  * EXAM KEY CONCEPT: This block goes at the BEGINNING of the system prompt,
- * in the highest-attention zone of the context window. It uses explicit
- * section headers (## Current Case Facts) so Claude can locate it reliably.
+ * in the highest-attention zone. It uses explicit section headers
+ * (## Current Case Facts) so Claude can locate it reliably.
  */
 export function renderCaseFacts(caseFacts) {
-  const lines = ['## Current Case Facts (verified this session)'];
-  lines.push('');
+  const lines = ['## Current Case Facts (verified this session)', ''];
 
-  // Customer
   if (caseFacts.customer) {
     const c = caseFacts.customer;
     lines.push(`**Customer:** ${c.name} (${c.id}, ${c.tier} tier, ${c.email})`);
@@ -228,50 +202,39 @@ export function renderCaseFacts(caseFacts) {
     lines.push('**Customer:** Not yet identified');
   }
 
-  // Orders
   if (caseFacts.orders.length > 0) {
-    lines.push('');
-    lines.push('**Orders discussed:**');
+    lines.push('', '**Orders discussed:**');
     for (const o of caseFacts.orders) {
       const parts = [`${o.orderId}: $${o.total}, ${o.status}`];
       if (o.deliveredAt) parts.push(`delivered ${o.deliveredAt}`);
-      if (o.trackingNumber) parts.push(`tracking ${o.trackingNumber}`);
       if (o.itemNames.length > 0) parts.push(`items: ${o.itemNames.join(', ')}`);
       lines.push(`- ${parts.join(' | ')}`);
     }
   }
 
-  // Actions taken
   if (caseFacts.actionsTaken.length > 0) {
-    lines.push('');
-    lines.push('**Actions taken this session:**');
+    lines.push('', '**Actions taken this session:**');
     for (const a of caseFacts.actionsTaken) {
       lines.push(`- [Turn ${a.turn}] ${a.action}: ${a.detail}`);
     }
   }
 
-  // Refunds
   if (caseFacts.refunds.length > 0) {
-    lines.push('');
-    lines.push('**Refunds processed:**');
+    lines.push('', '**Refunds processed:**');
     for (const r of caseFacts.refunds) {
       lines.push(`- ${r.refundId}: $${r.amount} for ${r.orderId} (${r.status}, ~${r.estimatedDays} days)`);
     }
   }
 
-  // Open issues
   if (caseFacts.openIssues.length > 0) {
-    lines.push('');
-    lines.push('**Open issues:**');
+    lines.push('', '**Open issues:**');
     for (const i of caseFacts.openIssues) {
       lines.push(`- ${i.description}`);
     }
   }
 
-  // Escalations
   if (caseFacts.escalations.length > 0) {
-    lines.push('');
-    lines.push('**Escalations:**');
+    lines.push('', '**Escalations:**');
     for (const e of caseFacts.escalations) {
       lines.push(`- ${e.ticketId}: ${e.issueSummary} (${e.priority} priority)`);
     }
@@ -283,30 +246,19 @@ export function renderCaseFacts(caseFacts) {
 // ─── System Prompt Builder ────────────────────────────────────────────────────
 
 /**
- * Build the system prompt with case facts injected at the beginning.
- *
  * EXAM KEY CONCEPT: Case facts go BEFORE the base system prompt so they
- * sit at the very top of the context window. The base prompt's own
- * "Case Facts Block" section serves as an instruction to Claude to
- * maintain these facts -- the actual data is provided here.
+ * sit at the very top of the context window.
  */
 export function buildSystemPrompt(caseFacts) {
-  const caseFactsBlock = renderCaseFacts(caseFacts);
-  return `${caseFactsBlock}\n\n---\n\n${csrSystemPrompt}`;
+  return `${renderCaseFacts(caseFacts)}\n\n---\n\n${csrSystemPrompt}`;
 }
 
 // ─── Tool Result Trimming ─────────────────────────────────────────────────────
 
 /**
- * Trim a tool result to only the fields needed for subsequent decisions.
- *
  * EXAM KEY CONCEPT: After extracting facts into the case facts block, the
- * raw tool result in the conversation history does not need to carry all
- * the verbose data. Trimming conserves context window tokens.
- *
- * The full data is preserved in the case facts block (via extractFacts).
- * Only fields that Claude needs for its NEXT decision are kept in the
- * conversation history.
+ * raw tool result in conversation history does not need all the verbose data.
+ * Trimming conserves context window tokens.
  */
 export function trimToolResult(toolName, rawContent) {
   try {
@@ -314,34 +266,19 @@ export function trimToolResult(toolName, rawContent) {
 
     switch (toolName) {
       case 'get_customer':
-        // If multiple matches, keep full data for disambiguation decision
         if (data.multiple_matches) return rawContent;
-        // Otherwise, keep only decision-relevant fields
         return JSON.stringify({
-          id: data.id,
-          name: data.name,
-          tier: data.tier,
+          id: data.id, name: data.name, tier: data.tier,
           accountStatus: data.accountStatus,
           _note: 'Full details in case facts block above',
         });
 
       case 'lookup_order':
-        // Keep order status and eligibility info; drop verbose item details
         return JSON.stringify({
-          orderId: data.orderId,
-          total: data.total,
-          status: data.status,
-          deliveredAt: data.deliveredAt,
-          itemCount: data.items?.length,
-          _note: 'Item details and dates in case facts block above',
+          orderId: data.orderId, total: data.total, status: data.status,
+          deliveredAt: data.deliveredAt, itemCount: data.items?.length,
+          _note: 'Item details in case facts block above',
         });
-
-      case 'process_refund':
-        // Refund results are already concise
-        return rawContent;
-
-      case 'escalate_to_human':
-        return rawContent;
 
       default:
         return rawContent;
@@ -353,7 +290,7 @@ export function trimToolResult(toolName, rawContent) {
 
 // ─── Usage Example ────────────────────────────────────────────────────────────
 //
-// In your agentic loop:
+// In your agentic loop (raw API or Agent SDK hooks):
 //
 //   import { createCaseFacts, extractFacts, buildSystemPrompt, trimToolResult } from './case-facts-block.js';
 //
@@ -365,6 +302,3 @@ export function trimToolResult(toolName, rawContent) {
 //   // After each tool call:
 //   extractFacts(toolName, toolInput, rawResult, caseFacts);
 //   const trimmedContent = trimToolResult(toolName, rawResult.content);
-//
-// This ensures the case facts block is always current and at the top of
-// the system prompt, while trimmed tool results conserve context tokens.

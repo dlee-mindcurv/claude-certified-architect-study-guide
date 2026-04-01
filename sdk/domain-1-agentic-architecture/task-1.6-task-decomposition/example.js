@@ -1,38 +1,30 @@
 /**
- * Task 1.6 -- Task Decomposition: Prompt Chain Example
+ * Task 1.6 -- Task Decomposition: Per-File Review Pipeline via Agent SDK
  *
  * Exam relevance: Scenarios 4 (Dev Productivity), 5 (CI Pipeline)
  *
  * Demonstrates a fixed sequential pipeline (prompt chain) for code review:
  *
- *   Stage 1: Per-file analysis
- *     - Each changed file is reviewed individually in its own API call
- *     - Claude sees ONLY that file's diff, not the entire changeset
+ *   Stage 1: Per-file analysis (parallel)
+ *     - Each changed file is reviewed individually via its own query() call
+ *     - Each query sees ONLY that file's diff, not the entire changeset
  *     - This prevents attention dilution across files
  *
- *   Stage 2: Cross-file integration
+ *   Stage 2: Cross-file integration (sequential)
  *     - All per-file results are collected and sent together
- *     - Claude looks for cross-cutting concerns: API consistency, shared
- *       state mutations, import chains, breaking changes
- *     - The model operates on condensed summaries, not raw diffs
+ *     - Looks for cross-cutting concerns: API consistency, shared state, etc.
+ *     - Operates on condensed summaries, not raw diffs
  *
- * KEY EXAM CONCEPT:
+ * EXAM KEY CONCEPT:
  *   Splitting a large code review into per-file analysis avoids attention
  *   dilution. When all files are sent in one prompt, Claude focuses on the
- *   most salient changes and skims the rest. Per-file passes ensure every
- *   file gets full attention depth.
+ *   most salient changes. Per-file passes ensure every file gets full depth.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
-
-const client = new Anthropic();
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 // ─── Sample Code Change (Multi-File PR) ─────────────────────────────────────
 
-/**
- * Simulates a multi-file pull request. In production, these diffs would come
- * from the Git provider's API (GitHub, GitLab, etc.).
- */
 const pullRequestFiles = [
   {
     filename: 'src/api/orders.js',
@@ -108,9 +100,6 @@ const pullRequestFiles = [
 ];
 
 // ─── Stage 1: Per-File Analysis ─────────────────────────────────────────────
-//
-// Each file gets its own API call. The model sees ONLY that file's diff,
-// which keeps the context focused and prevents attention dilution.
 
 const PER_FILE_SYSTEM_PROMPT = `You are a senior code reviewer. Analyze the given file diff for:
 1. Logic errors and bugs
@@ -136,71 +125,56 @@ Return a structured JSON object:
 Be thorough. If there are no issues, return an empty issues array.`;
 
 /**
- * Stage 1: Analyze a single file in isolation.
- *
- * By sending only one file per call, Claude applies its full attention to
- * that file's changes. Compare this to sending all 3 files together, where
- * the cache.js (new file) would likely dominate attention at the expense
- * of the subtle cache invalidation bug in orders.js.
+ * Analyze a single file using query().
+ * Each file gets its own call so Claude applies full attention to it.
  */
 async function analyzeFile(file) {
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    system: PER_FILE_SYSTEM_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content: `Review this file change:\n\nFile: ${file.filename}\n\nDiff:\n${file.diff}`,
-      },
-    ],
-  });
+  let result = '{}';
 
-  const text = response.content.find((b) => b.type === 'text')?.text ?? '{}';
+  for await (const message of query({
+    prompt: `Review this file change:\n\nFile: ${file.filename}\n\nDiff:\n${file.diff}`,
+    options: {
+      systemPrompt: PER_FILE_SYSTEM_PROMPT,
+      maxTurns: 1,  // Single-turn: no tools needed
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      result = message.result;
+    }
+  }
 
-  // Parse the structured review (with fallback for non-JSON responses)
   try {
-    return JSON.parse(text);
+    return JSON.parse(result);
   } catch {
-    return { filename: file.filename, issues: [], summary: text, parseError: true };
+    return { filename: file.filename, issues: [], summary: result, parseError: true };
   }
 }
 
 /**
- * Run per-file analysis for all files in the PR.
- *
- * Files are analyzed in parallel -- each call is independent, so there is
- * no need to serialize them. This also reduces total latency.
+ * Run per-file analysis for all files in parallel.
+ * Each call is independent, so parallelism reduces total latency.
  */
 async function runPerFileAnalysis(files) {
   console.log(`Stage 1: Analyzing ${files.length} files individually...\n`);
-
   const results = await Promise.all(files.map(analyzeFile));
-
   for (const result of results) {
     const issueCount = result.issues?.length ?? 0;
     console.log(`  ${result.filename}: ${issueCount} issue(s) found`);
   }
-
   return results;
 }
 
 // ─── Stage 2: Cross-File Integration ────────────────────────────────────────
-//
-// The integration pass receives the condensed per-file results (NOT the raw
-// diffs). It looks for issues that only emerge when considering multiple
-// files together.
 
 const CROSS_FILE_SYSTEM_PROMPT = `You are a senior code reviewer performing a cross-file integration review.
-You have already received per-file reviews. Now look for cross-cutting concerns:
+Look for cross-cutting concerns:
+1. API consistency
+2. Shared state management (caches, databases)
+3. Import chains and missing imports
+4. Breaking changes across files
+5. Missing coordination between related changes
 
-1. API consistency: Are related endpoints using consistent patterns?
-2. Shared state: Are caches, databases, or global state managed consistently?
-3. Import chains: Are there circular dependencies or missing imports?
-4. Breaking changes: Could changes in one file break callers in another?
-5. Missing coordination: Should changes in one file have corresponding changes elsewhere?
-
-Return a structured JSON object:
+Return JSON:
 {
   "cross_file_issues": [
     {
@@ -214,58 +188,44 @@ Return a structured JSON object:
   "summary": "<overall PR summary>"
 }`;
 
-/**
- * Stage 2: Cross-file integration analysis.
- *
- * This stage operates on the condensed per-file results. The model sees
- * summaries and issue lists rather than raw diffs, which keeps the context
- * focused on cross-cutting concerns.
- */
 async function runCrossFileIntegration(perFileResults) {
   console.log('\nStage 2: Cross-file integration analysis...\n');
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    system: CROSS_FILE_SYSTEM_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content:
-          'Here are the per-file review results for this PR:\n\n' +
-          JSON.stringify(perFileResults, null, 2) +
-          '\n\nNow perform the cross-file integration review.',
-      },
-    ],
-  });
+  let result = '{}';
 
-  const text = response.content.find((b) => b.type === 'text')?.text ?? '{}';
+  for await (const message of query({
+    prompt:
+      'Here are the per-file review results for this PR:\n\n' +
+      JSON.stringify(perFileResults, null, 2) +
+      '\n\nNow perform the cross-file integration review.',
+    options: {
+      systemPrompt: CROSS_FILE_SYSTEM_PROMPT,
+      maxTurns: 1,
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      result = message.result;
+    }
+  }
 
   try {
-    return JSON.parse(text);
+    return JSON.parse(result);
   } catch {
-    return { cross_file_issues: [], overall_assessment: 'unknown', summary: text };
+    return { cross_file_issues: [], overall_assessment: 'unknown', summary: result };
   }
 }
 
 // ─── Pipeline Orchestrator ──────────────────────────────────────────────────
 
-/**
- * Run the complete two-stage review pipeline.
- *
- * This is the prompt chain: Stage 1 (per-file) feeds into Stage 2 (cross-file).
- * The structure is fixed at design time -- every PR goes through both stages.
- */
 async function reviewPullRequest(files) {
   console.log(`=== Code Review Pipeline: ${files.length} files ===\n`);
 
   // Stage 1: Per-file analysis (parallel)
   const perFileResults = await runPerFileAnalysis(files);
 
-  // Stage 2: Cross-file integration (depends on Stage 1 output)
+  // Stage 2: Cross-file integration (depends on Stage 1)
   const integrationResult = await runCrossFileIntegration(perFileResults);
 
-  // Combine results
   return {
     perFileResults,
     integrationResult,
@@ -275,33 +235,15 @@ async function reviewPullRequest(files) {
   };
 }
 
-// ─── Demo ───────────────────────────────────────────────────────────────────
+// ─── Run ────────────────────────────────────────────────────────────────────
 
 async function main() {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.log('Set ANTHROPIC_API_KEY to run this example.\n');
-    console.log('This example demonstrates a two-stage prompt chain:');
-    console.log('  Stage 1: Per-file review (one API call per file)');
-    console.log('  Stage 2: Cross-file integration (one API call with all summaries)\n');
-    console.log('Sample files that would be reviewed:');
-    for (const file of pullRequestFiles) {
-      console.log(`  - ${file.filename}`);
-    }
-    console.log('\nExpected cross-file finding:');
-    console.log('  The cache in orders.js is not invalidated when updateOrderStatus');
-    console.log('  modifies an order. The refunds.js file calls getOrder(), which will');
-    console.log('  return stale cached data after a status update.');
-    return;
-  }
-
   const result = await reviewPullRequest(pullRequestFiles);
   console.log('\n=== Final Review Results ===\n');
   console.log(JSON.stringify(result, null, 2));
 }
 
 main().catch(console.error);
-
-// ─── Exports ────────────────────────────────────────────────────────────────
 
 export {
   analyzeFile,

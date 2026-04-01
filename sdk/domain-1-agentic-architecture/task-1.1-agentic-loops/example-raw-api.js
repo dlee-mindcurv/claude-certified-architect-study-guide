@@ -15,7 +15,7 @@
 
 import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
-import { csrToolDefinitions, executeCsrTool } from '../../../shared/tools/csr-tools.js';
+import {csrToolDefinitions, executeCsrTool, executeCsrToolRaw} from '../../../shared/tools/csr-tools.js';
 import { csrSystemPrompt } from '../../../shared/prompts/csr-system-prompt.js';
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -104,11 +104,15 @@ async function runAgentLoop(userMessage) {
       const toolResults = [];
       const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
 
+      // if the stop reason is "tool_use", then toolUseBlocks will be non-empty and you can look through each
       for (const toolUse of toolUseBlocks) {
+
+        console.log('RESPONSE:', toolUse)
+
         console.log(`  Tool call: ${toolUse.name}(${JSON.stringify(toolUse.input)})`);
 
         // Execute the tool using our mock backend
-        const result = executeCsrTool(toolUse.name, toolUse.input);
+        const result = executeCsrToolRaw(toolUse.name, toolUse.input);
 
         console.log(`  Result: ${result.content.substring(0, 100)}...`);
 
@@ -163,6 +167,6 @@ async function runAgentLoop(userMessage) {
 // ─── Run the Example ────────────────────────────────────────────────────────
 
 const userQuery =
-  "I need to return my order ORD-5001, my email is alice@example.com";
+  "please analyze the order ORD-5001, and the user details for customerId: C-1001 associated with that order ";
 
 runAgentLoop(userQuery).catch(console.error);

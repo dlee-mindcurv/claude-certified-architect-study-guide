@@ -1,96 +1,63 @@
 /**
- * Scenario 3: Research System — Subagent Configurations
+ * Scenario 3: Research System -- Subagent Configurations for Agent SDK
  *
  * Exam relevance (Task 1.3):
- * - Complete AgentDefinition configs for a multi-agent research system
- * - Demonstrates allowedTools, explicit context patterns, and model selection
+ * - Reusable agent definitions for the `agents` config in query()
+ * - Demonstrates tool scoping, model selection, and capability metadata
  * - Shows how to configure subagents for reuse across different coordinators
  *
- * These configurations are designed to be imported by coordinators.
- * The coordinator creates subagent instances using these definitions.
+ * EXAM KEY CONCEPT:
+ *   These definitions are imported by coordinators and passed to
+ *   query()'s options.agents. Each definition restricts which tools
+ *   the subagent can access, enforcing scope partitioning.
  */
 
-import { researchToolDefinitions, executeResearchTool } from '../../../../shared/tools/research-tools.js';
 import {
   searchSubagentPrompt,
   synthesisSubagentPrompt,
 } from '../../../../shared/prompts/research-coordinator.js';
 
-// ─── Helper: Create Tool with Execute Function ──────────────────────────────
-
-function createToolWithExecutor(toolName) {
-  const toolDef = researchToolDefinitions.find(t => t.name === toolName);
-  if (!toolDef) {
-    throw new Error(`Unknown tool: ${toolName}. Available: ${researchToolDefinitions.map(t => t.name).join(', ')}`);
-  }
-  return {
-    ...toolDef,
-    execute: async (input) => {
-      const result = executeResearchTool(toolName, input);
-      if (result.isError) {
-        // Propagate error information to the subagent
-        throw new Error(result.content);
-      }
-      return result.content;
-    },
-  };
-}
-
 // ─── Subagent Definitions ───────────────────────────────────────────────────
+//
+// These objects match the AgentDefinition shape expected by options.agents.
+// Each is designed to be imported and spread into a coordinator's config.
 
 /**
  * Web Search Subagent
  *
- * EXAM CONCEPT: Minimal tool set — only web_search
+ * EXAM CONCEPT: Minimal tool set -- only web_search
  *
- * This agent is responsible for:
- * - Running targeted web searches on assigned subtopics
- * - Returning structured findings with source attribution
- * - Reporting gaps when searches return no results
+ * This agent:
+ * - Runs targeted web searches on assigned subtopics
+ * - Returns structured findings with source attribution
+ * - Reports gaps when searches return no results
  *
  * It CANNOT:
- * - Analyze documents (that's the analysis subagent's job)
- * - Verify facts (that's the synthesis subagent's scoped tool)
+ * - Analyze documents (analysis-agent's job)
+ * - Verify facts (synthesis-agent's scoped tool)
  * - Communicate with other subagents (only the coordinator routes)
  */
 export const webSearchAgentDef = {
-  name: 'web-search-agent',
+  description: 'Searches the web for information on a specific subtopic. Assign distinct subtopics to avoid duplication.',
+  prompt: searchSubagentPrompt,
+
+  // EXAM CONCEPT: Tool restriction enforced by the SDK
+  tools: ['mcp__research__web_search'],
 
   // EXAM CONCEPT: Model selection per subagent
-  // Search agents do relatively simple work (run queries, format results)
-  // so a faster/cheaper model could be used in production
-  model: 'claude-sonnet-4-20250514',
-
-  instructions: searchSubagentPrompt,
-
-  // EXAM CONCEPT: allowedTools restricts this agent to web_search ONLY
-  allowedTools: ['web_search'],
-  tools: [createToolWithExecutor('web_search')],
-
-  // Metadata for the coordinator to use when deciding which agent to invoke
-  capabilities: {
-    canSearch: true,
-    canAnalyzeDocuments: false,
-    canVerifyFacts: false,
-    parallelizable: true,  // Multiple instances can run simultaneously
-  },
+  // Search agents do simple work -- a faster model could be used in production
+  model: 'sonnet',
+  maxTurns: 10,
 };
 
 /**
  * Document Analysis Subagent
  *
  * EXAM CONCEPT: Specialized tool access for a specific role
- *
- * This agent is responsible for:
- * - Analyzing documents by ID using the analyze_document tool
- * - Extracting structured findings with evidence and confidence
- * - Identifying gaps in document coverage
  */
 export const documentAnalysisAgentDef = {
-  name: 'document-analysis-agent',
-  model: 'claude-sonnet-4-20250514',
-
-  instructions: `You are a document analysis specialist. Your task is to analyze assigned documents and extract structured, cited findings.
+  description: 'Analyzes a specific document by ID and extracts structured findings with evidence and confidence levels.',
+  prompt: `You are a document analysis specialist. Your task is to analyze assigned documents and extract structured, cited findings.
 
 ## Process
 1. Use analyze_document to examine each assigned document
@@ -102,114 +69,56 @@ export const documentAnalysisAgentDef = {
 3. Identify topics the document does NOT cover (gaps)
 
 ## Output Format
-Return structured JSON:
-{
-  "documentId": "doc-XXX",
-  "title": "Document Title",
-  "findings": [
-    {
-      "claim": "specific claim",
-      "evidence": "supporting evidence text",
-      "confidence": "high",
-      "page": 12,
-      "sourceDocument": "Document Title"
-    }
-  ],
-  "gaps": ["topic not covered", "another topic not covered"],
-  "metadata": {
-    "author": "...",
-    "publishedDate": "YYYY-MM-DD"
-  }
-}
+Return structured JSON with documentId, title, findings array, and gaps array.
 
 ## Important
 - Do NOT fabricate findings. Only report what the document actually contains.
-- If a focus area is specified but the document doesn't cover it, list it as a gap.
 - Preserve the original wording of claims as closely as possible.`,
 
-  allowedTools: ['analyze_document'],
-  tools: [createToolWithExecutor('analyze_document')],
-
-  capabilities: {
-    canSearch: false,
-    canAnalyzeDocuments: true,
-    canVerifyFacts: false,
-    parallelizable: true,
-  },
+  tools: ['mcp__research__analyze_document'],
+  model: 'sonnet',
+  maxTurns: 10,
 };
 
 /**
  * Synthesis Subagent
  *
  * EXAM CONCEPT: Scoped cross-role tool
- * The synthesis agent has verify_fact — a lightweight tool that lets it
- * do simple fact-checks without needing full web_search access.
- * This is more efficient than routing every fact-check back to the coordinator.
- *
- * This agent is responsible for:
- * - Combining findings from search and analysis agents
- * - Producing a coherent, cited report
- * - Detecting and annotating conflicts between sources
- * - Using verify_fact for quick cross-checks
+ * verify_fact is a lightweight tool that lets the synthesis agent do
+ * simple fact-checks without needing full web_search access.
  */
 export const synthesisAgentDef = {
-  name: 'synthesis-agent',
-  model: 'claude-sonnet-4-20250514',
-
-  instructions: synthesisSubagentPrompt,
+  description: 'Combines findings from search and analysis into a coherent, cited report. Has verify_fact for quick fact-checks.',
+  prompt: synthesisSubagentPrompt,
 
   // EXAM CONCEPT: Scoped cross-role tool
-  // verify_fact is a "cross-role" tool because fact verification is
-  // tangential to synthesis, but the synthesis agent needs lightweight
-  // access to it. Full web_search would be overkill and scope creep.
-  allowedTools: ['verify_fact'],
-  tools: [createToolWithExecutor('verify_fact')],
-
-  capabilities: {
-    canSearch: false,
-    canAnalyzeDocuments: false,
-    canVerifyFacts: true,
-    parallelizable: false,  // Synthesis must run AFTER search/analysis
-  },
+  // verify_fact is tangential to synthesis, but the agent needs lightweight
+  // access. Full web_search would be overkill and scope creep.
+  tools: ['mcp__research__verify_fact'],
+  model: 'sonnet',
+  maxTurns: 10,
 };
 
 // ─── Subagent Registry ──────────────────────────────────────────────────────
 //
-// EXAM CONCEPT: The coordinator looks up subagent definitions from a registry
-// rather than hardcoding them. This makes the system extensible.
+// EXAM CONCEPT: The coordinator looks up subagent definitions from a registry.
+// This makes the system extensible -- adding a new subagent type is a single
+// addition to this object.
 
 export const subagentRegistry = {
-  'web-search-agent': webSearchAgentDef,
-  'document-analysis-agent': documentAnalysisAgentDef,
+  'search-agent': webSearchAgentDef,
+  'analysis-agent': documentAnalysisAgentDef,
   'synthesis-agent': synthesisAgentDef,
 };
 
 /**
- * Get a subagent definition by name.
- * @param {string} name - Subagent name from the registry
- * @returns {Object} AgentDefinition
- */
-export function getSubagentDef(name) {
-  const def = subagentRegistry[name];
-  if (!def) {
-    throw new Error(
-      `Unknown subagent: ${name}. Available: ${Object.keys(subagentRegistry).join(', ')}`
-    );
-  }
-  return def;
-}
-
-/**
- * Get all subagent definitions that support a given capability.
- * Useful for dynamic routing.
+ * Build the agents config for query() from the registry.
+ * Useful when a coordinator wants all available subagents.
  *
- * @param {'canSearch'|'canAnalyzeDocuments'|'canVerifyFacts'} capability
- * @returns {Object[]} Array of matching AgentDefinitions
+ * @returns {Record<string, AgentDefinition>} agents config for query()
  */
-export function getSubagentsByCapability(capability) {
-  return Object.values(subagentRegistry).filter(
-    def => def.capabilities[capability]
-  );
+export function buildAgentsConfig() {
+  return { ...subagentRegistry };
 }
 
 // ─── Context Template Builders ──────────────────────────────────────────────
@@ -220,7 +129,6 @@ export function getSubagentsByCapability(capability) {
 
 /**
  * Build a task description for a search subagent.
- * The subtopic and any constraints are passed EXPLICITLY.
  *
  * @param {string} subtopic - What to research
  * @param {string[]} [avoidDuplicating] - Topics already covered by other agents
@@ -246,7 +154,6 @@ Focus EXCLUSIVELY on "${subtopic}".`;
 
 /**
  * Build a task description for the synthesis subagent.
- * ALL findings from prior agents are passed EXPLICITLY.
  *
  * @param {string} originalQuery - The user's original research query
  * @param {Object[]} findings - Array of { subtopic, source, result } objects
@@ -267,8 +174,7 @@ ${findingsText}
 
 ## Requirements
 - Cite every claim with its source
-- When sources conflict, present BOTH values with attribution — do NOT pick one
+- When sources conflict, present BOTH values with attribution
 - Note publication dates next to all statistics
-- Identify coverage gaps (subtopics with no or limited findings)
-- Use verify_fact for any statistics that seem questionable`;
+- Identify coverage gaps`;
 }

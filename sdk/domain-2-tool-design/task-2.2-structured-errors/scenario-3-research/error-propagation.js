@@ -3,16 +3,12 @@
  *
  * Exam relevance: Task 2.2 (Structured error responses), Task 5.3 (Error propagation)
  *
- * In a multi-agent architecture, tool errors in subagents must propagate up
- * to the coordinator with enough structured context for routing decisions.
- * The coordinator never sees raw tool errors — it receives a structured
- * summary from the subagent that includes:
- *
- * - failureType: maps to errorCategory but at the subagent level
- * - attemptedTask: what the subagent was trying to do
- * - partialResults: anything found before the failure
- * - alternatives: suggested recovery approaches
- * - subagentId: which subagent failed (for targeted retry)
+ * EXAM KEY CONCEPT:
+ *   In multi-agent architectures, tool errors in subagents must propagate UP
+ *   to the coordinator with structured context for routing decisions.
+ *   The coordinator never sees raw tool errors — it receives a structured
+ *   summary that includes: which subagent failed, what was attempted,
+ *   partial results, and suggested alternatives.
  *
  * This enables the coordinator to:
  * 1. Retry the same subagent for transient failures
@@ -21,276 +17,203 @@
  * 4. Report the failure in the final output
  */
 
-import {
-  createErrorResponse,
-  createSuccessResponse,
-  ERROR_CATEGORIES,
-} from '../../../../shared/schemas/error-response.js';
-import { executeResearchTool } from '../../../../shared/tools/research-tools.js';
+import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 
-// ─── Subagent Error Context Builder ────────────────────────────────────────
+// ─── Subagent Error Context Builder ───────────────────────────────────────
 // Wraps raw tool errors with subagent-level context for the coordinator.
 
 /**
- * Execute a research tool and wrap errors with subagent context.
+ * Build a propagated error with subagent context.
  *
- * When a tool fails inside a subagent, the raw error (e.g., "Search timed out")
- * is not enough for the coordinator. The coordinator needs to know:
- * - Which subagent failed
- * - What task it was working on
- * - What partial results exist
- * - What the coordinator should do next
- *
- * @param {string} subagentId - Identifier for the subagent (e.g., 'search-agent-1')
- * @param {string} taskDescription - What the subagent was assigned to do
- * @param {string} toolName - The tool being called
- * @param {Object} toolInput - The tool input parameters
- * @param {Array} priorResults - Results from earlier tool calls in this subagent's session
- * @returns {Object} Success result or error with propagation context
+ * EXAM KEY CONCEPT: Raw tool errors ("Search timed out") are not enough
+ * for the coordinator. It needs: which subagent, what task, partial
+ * results, and suggested recovery approaches.
  */
-export function executeWithPropagation(
+export function buildPropagatedError({
   subagentId,
   taskDescription,
-  toolName,
-  toolInput,
-  priorResults = []
-) {
-  const result = executeResearchTool(toolName, toolInput);
+  errorCategory,
+  isRetryable,
+  message,
+  partialResults = [],
+}) {
+  const alternatives = buildAlternatives(errorCategory, subagentId);
 
-  // Success — return the result with attribution metadata
-  if (!result.isError) {
-    return {
-      ...result,
-      _meta: {
-        subagentId,
-        taskDescription,
-        toolName,
-        executedAt: new Date().toISOString(),
-      },
-    };
-  }
-
-  // Error — wrap with propagation context for the coordinator
-  const rawError = JSON.parse(result.content);
-
-  return createErrorResponse({
-    errorCategory: rawError.errorCategory,
-    isRetryable: rawError.isRetryable,
-    message: rawError.message,
-    context: {
-      // Subagent identification
-      subagentId,
-      subagentTask: taskDescription,
-
-      // What was attempted
-      failedTool: toolName,
-      failedInput: toolInput,
-
-      // Partial work before the failure
-      partialResults: priorResults,
-      partialResultCount: priorResults.length,
-
-      // Recovery guidance for the coordinator
-      alternatives: buildAlternatives(rawError, toolName, toolInput),
-
-      // Timing
-      failedAt: new Date().toISOString(),
-    },
-  });
+  return {
+    errorCategory,
+    isRetryable,
+    message,
+    subagentId,
+    subagentTask: taskDescription,
+    partialResults,
+    partialResultCount: partialResults.length,
+    alternatives,
+    failedAt: new Date().toISOString(),
+  };
 }
 
-// ─── Recovery Alternative Builder ──────────────────────────────────────────
-// Generates suggested recovery approaches based on the error type and tool.
+// ─── Recovery Alternative Builder ─────────────────────────────────────────
 
-function buildAlternatives(error, toolName, toolInput) {
+function buildAlternatives(errorCategory, subagentId) {
   const alternatives = [];
 
-  switch (error.errorCategory) {
-    case ERROR_CATEGORIES.TRANSIENT:
-      alternatives.push({
-        approach: 'retry_same_subagent',
-        description: `Retry ${toolName} with the same input after a brief delay`,
-        confidence: 'high',
-      });
-      alternatives.push({
-        approach: 'retry_different_query',
-        description: 'Try a more specific or differently-worded query',
-        confidence: 'medium',
-      });
+  switch (errorCategory) {
+    case 'transient':
+      alternatives.push(
+        { approach: 'retry_same_subagent', description: `Retry ${subagentId} after a brief delay`, confidence: 'high' },
+        { approach: 'retry_different_query', description: 'Try a more specific query', confidence: 'medium' },
+      );
       break;
-
-    case ERROR_CATEGORIES.VALIDATION:
-      if (toolName === 'analyze_document') {
-        alternatives.push({
-          approach: 'search_for_document',
-          description:
-            `Document ${toolInput.document_id} not found. ` +
-            'Use web_search to find available documents on this topic.',
-          confidence: 'high',
-        });
-      }
-      if (toolName === 'web_search') {
-        alternatives.push({
-          approach: 'rephrase_query',
-          description: 'Rephrase the search query with different keywords',
-          confidence: 'medium',
-        });
-      }
+    case 'validation':
+      alternatives.push(
+        { approach: 'search_for_document', description: 'Use web_search to find available documents', confidence: 'high' },
+      );
       break;
-
-    case ERROR_CATEGORIES.BUSINESS:
-      alternatives.push({
-        approach: 'proceed_with_partial',
-        description: 'Continue with available results and note the coverage gap',
-        confidence: 'high',
-      });
+    case 'business':
+      alternatives.push(
+        { approach: 'proceed_with_partial', description: 'Continue with available results, note gap', confidence: 'high' },
+      );
       break;
-
     default:
-      alternatives.push({
-        approach: 'escalate_to_coordinator',
-        description: 'Return error to coordinator for manual handling',
-        confidence: 'low',
-      });
+      alternatives.push(
+        { approach: 'escalate_to_coordinator', description: 'Return to coordinator for manual handling', confidence: 'low' },
+      );
   }
 
   return alternatives;
 }
 
-// ─── Coordinator Error Handler ─────────────────────────────────────────────
-// Processes propagated errors and decides on recovery actions.
+// ─── Coordinator Error Handler ────────────────────────────────────────────
 
 /**
  * Handle an error propagated from a subagent.
  *
- * The coordinator receives structured error context and decides:
- * 1. Should the subagent retry?
- * 2. Should a different subagent handle this?
- * 3. Should we proceed with partial results?
- * 4. Should we report the gap in the final output?
- *
- * @param {Object} propagatedError - Error with subagent context
- * @param {number} attemptNumber - How many times this task has been attempted
- * @returns {Object} Recovery decision for the coordinator
+ * EXAM KEY CONCEPT: The coordinator decision tree:
+ * - transient + attempts < max -> retry same subagent
+ * - validation + high-confidence alternative -> reassign task
+ * - all others -> proceed with partial results, note coverage gap
  */
 export function handlePropagatedError(propagatedError, attemptNumber = 1) {
-  const error = JSON.parse(propagatedError.content);
   const maxAttempts = 3;
 
-  // Decision tree based on error category and attempt count
-  if (error.errorCategory === ERROR_CATEGORIES.TRANSIENT && attemptNumber < maxAttempts) {
+  if (propagatedError.errorCategory === 'transient' && attemptNumber < maxAttempts) {
     return {
       action: 'retry',
-      subagentId: error.subagentId,
-      task: error.subagentTask,
-      delay: Math.pow(2, attemptNumber) * 1000, // Exponential backoff
-      reason: `Transient failure (attempt ${attemptNumber}/${maxAttempts}): ${error.message}`,
+      subagentId: propagatedError.subagentId,
+      task: propagatedError.subagentTask,
+      delay: Math.pow(2, attemptNumber) * 1000,
+      reason: `Transient failure (attempt ${attemptNumber}/${maxAttempts}): ${propagatedError.message}`,
     };
   }
 
-  if (error.errorCategory === ERROR_CATEGORIES.VALIDATION) {
-    const alternative = error.alternatives?.find(
-      (a) => a.confidence === 'high'
-    );
-    if (alternative) {
+  if (propagatedError.errorCategory === 'validation') {
+    const alt = propagatedError.alternatives?.find(a => a.confidence === 'high');
+    if (alt) {
       return {
         action: 'reassign',
-        approach: alternative.approach,
-        description: alternative.description,
-        reason: `Validation error: ${error.message}`,
+        approach: alt.approach,
+        description: alt.description,
+        reason: `Validation error: ${propagatedError.message}`,
       };
     }
   }
 
-  // For all other cases (exhausted retries, business errors, etc.)
+  // Exhausted retries or non-recoverable -> proceed with partial results
   return {
     action: 'proceed_with_partial',
-    partialResults: error.partialResults || [],
+    partialResults: propagatedError.partialResults || [],
     coverageGap: {
-      task: error.subagentTask,
-      reason: error.message,
-      category: error.errorCategory,
+      task: propagatedError.subagentTask,
+      reason: propagatedError.message,
+      category: propagatedError.errorCategory,
     },
     reason:
-      error.errorCategory === ERROR_CATEGORIES.TRANSIENT
+      propagatedError.errorCategory === 'transient'
         ? `Transient failure persisted after ${maxAttempts} attempts`
-        : `Non-recoverable ${error.errorCategory} error: ${error.message}`,
+        : `Non-recoverable ${propagatedError.errorCategory} error: ${propagatedError.message}`,
   };
 }
 
-// ─── Demonstration ─────────────────────────────────────────────────────────
+// ─── MCP Tool: report_subagent_error ──────────────────────────────────────
+// A coordinator-level tool that subagents call to propagate errors upward.
 
-export function demonstrateErrorPropagation() {
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  Scenario 3: Error Propagation in Multi-Agent Research    ║');
-  console.log('╚════════════════════════════════════════════════════════════╝\n');
+export const reportSubagentErrorTool = tool(
+  'report_subagent_error',
+  'Report a structured error from a subagent to the coordinator. ' +
+  'Include the subagent ID, what task failed, error category, and any partial results. ' +
+  'The coordinator uses this to decide: retry, reassign, or proceed with gaps.',
+  {
+    subagent_id: z.string().describe('Which subagent encountered the error'),
+    task_description: z.string().describe('What the subagent was trying to do'),
+    error_category: z.enum(['transient', 'validation', 'business', 'permission']).describe('Error type'),
+    is_retryable: z.boolean().describe('Whether retrying might succeed'),
+    message: z.string().describe('Human-readable error description'),
+    partial_results: z.array(z.string()).optional().describe('Any results gathered before failure'),
+  },
+  async ({ subagent_id, task_description, error_category, is_retryable, message, partial_results }) => {
+    const propagated = buildPropagatedError({
+      subagentId: subagent_id,
+      taskDescription: task_description,
+      errorCategory: error_category,
+      isRetryable: is_retryable,
+      message,
+      partialResults: partial_results || [],
+    });
 
-  // Simulate a search subagent encountering a transient error
+    const decision = handlePropagatedError(propagated, 1);
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ propagatedError: propagated, coordinatorDecision: decision }) }],
+    };
+  },
+);
+
+export const errorPropagationServer = createSdkMcpServer({
+  name: 'error-propagation',
+  version: '1.0.0',
+  tools: [reportSubagentErrorTool],
+});
+
+// ─── Demonstration ────────────────────────────────────────────────────────
+
+function demonstrate() {
+  console.log('Task 2.2 Scenario 3: Error Propagation in Multi-Agent Research\n');
+
+  // Simulate: search subagent times out
   console.log('--- Scenario: Search subagent times out ---\n');
-
-  // Force a transient error for demonstration
-  const errorResult = createErrorResponse({
-    errorCategory: ERROR_CATEGORIES.TRANSIENT,
+  const transientError = buildPropagatedError({
+    subagentId: 'search-agent-1',
+    taskDescription: 'Search for AI impact on visual arts',
+    errorCategory: 'transient',
     isRetryable: true,
     message: 'Search service timed out after 30s',
-    context: {
-      subagentId: 'search-agent-1',
-      subagentTask: 'Search for AI impact on visual arts',
-      failedTool: 'web_search',
-      failedInput: { query: 'AI visual arts 2025' },
-      partialResults: [],
-      partialResultCount: 0,
-      alternatives: [
-        {
-          approach: 'retry_same_subagent',
-          description: 'Retry web_search with the same input after a brief delay',
-          confidence: 'high',
-        },
-        {
-          approach: 'retry_different_query',
-          description: 'Try a more specific query',
-          confidence: 'medium',
-        },
-      ],
-      failedAt: new Date().toISOString(),
-    },
+    partialResults: [],
   });
+  console.log('Propagated error:', JSON.stringify(transientError, null, 2));
 
-  console.log('Propagated error from subagent:');
-  console.log(JSON.stringify(JSON.parse(errorResult.content), null, 2));
+  console.log('\nCoordinator decision (attempt 1):');
+  console.log(JSON.stringify(handlePropagatedError(transientError, 1), null, 2));
 
-  // Coordinator handles the error
-  console.log('\n--- Coordinator decision (attempt 1) ---\n');
-  const decision1 = handlePropagatedError(errorResult, 1);
-  console.log(JSON.stringify(decision1, null, 2));
+  console.log('\nCoordinator decision (attempt 3 - exhausted):');
+  console.log(JSON.stringify(handlePropagatedError(transientError, 3), null, 2));
 
-  console.log('\n--- Coordinator decision (attempt 3 — exhausted) ---\n');
-  const decision3 = handlePropagatedError(errorResult, 3);
-  console.log(JSON.stringify(decision3, null, 2));
-
-  // Simulate a validation error (document not found)
+  // Simulate: analysis subagent - document not found
   console.log('\n--- Scenario: Analysis subagent — document not found ---\n');
-
-  const validationError = executeWithPropagation(
-    'analysis-agent-1',
-    'Analyze report on AI in music production',
-    'analyze_document',
-    { document_id: 'doc-999' },
-    [] // no prior results
-  );
-
-  if (validationError.isError) {
-    console.log('Propagated error:');
-    console.log(JSON.stringify(JSON.parse(validationError.content), null, 2));
-
-    const decision = handlePropagatedError(validationError, 1);
-    console.log('\nCoordinator decision:');
-    console.log(JSON.stringify(decision, null, 2));
-  }
+  const validationError = buildPropagatedError({
+    subagentId: 'analysis-agent-1',
+    taskDescription: 'Analyze report on AI in music production',
+    errorCategory: 'validation',
+    isRetryable: false,
+    message: 'Document not found: doc-999',
+  });
+  console.log('Propagated error:', JSON.stringify(validationError, null, 2));
+  console.log('\nCoordinator decision:');
+  console.log(JSON.stringify(handlePropagatedError(validationError, 1), null, 2));
 }
 
-// Run demonstration if executed directly
+// Run if executed directly
 const isDirectExecution = import.meta.url === `file://${process.argv[1]}`;
 if (isDirectExecution) {
-  demonstrateErrorPropagation();
+  demonstrate();
 }

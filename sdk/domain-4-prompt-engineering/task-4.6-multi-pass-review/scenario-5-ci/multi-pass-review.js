@@ -9,17 +9,19 @@
  * - Confidence-based filtering reduces false positives
  * - Task 4.1: Uses explicit review criteria throughout
  *
+ * Uses Agent SDK query() for session isolation -- each query() call runs
+ * in an independent session with no shared context.
+ *
  * Pipeline architecture:
- *   Phase 1: Per-file local analysis (parallel, N API calls)
- *   Phase 2: Cross-file integration (1 API call)
- *   Phase 3: Independent verification (1 API call, isolated)
+ *   Phase 1: Per-file local analysis (parallel, N query() calls)
+ *   Phase 2: Cross-file integration (1 query() call)
+ *   Phase 3: Independent verification (1 query() call, isolated)
  *   Phase 4: Confidence filtering and report generation
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.6-multi-pass-review/scenario-5-ci/multi-pass-review.js
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import {
   reviewCriteriaPrompt,
   perFileReviewPrompt,
@@ -27,9 +29,6 @@ import {
 } from '../../../../shared/prompts/review-criteria.js';
 
 // ─── Configuration ──────────────────────────────────────────────────────────
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
 
 // Confidence threshold for surfacing findings to developers
 // EXAM NOTE: Below this threshold, findings are logged but not reported
@@ -135,13 +134,8 @@ async function runPhase1(files) {
   const perFileResults = {};
 
   const promises = Object.entries(files).map(async ([filePath, content]) => {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      messages: [
-        {
-          role: 'user',
-          content: `${perFileReviewPrompt}
+    // EXAM KEY CONCEPT: Each file gets its own query() call -- session isolation
+    const prompt = `${perFileReviewPrompt}
 
 ${reviewCriteriaPrompt}
 
@@ -165,15 +159,17 @@ Return structured JSON:
       "confidence": <0-1>
     }
   ]
-}`,
-        },
-      ],
-    });
+}`;
 
-    const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    let resultText = '';
+    for await (const message of query({ prompt })) {
+      if (message.type === 'result' && message.subtype === 'success') {
+        resultText = message.result;
+      }
+    }
 
     try {
-      const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+      const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
       const result = JSON.parse(jsonMatch[1].trim());
       perFileResults[filePath] = result;
       console.log(`  ${filePath}: ${result.findings?.length || 0} findings`);
@@ -199,25 +195,17 @@ async function runPhase2(perFileResults, files) {
 
   const startTime = Date.now();
 
-  // Format per-file results
   const perFileText = Object.entries(perFileResults)
     .map(([file, result]) => `### ${file}\n${JSON.stringify(result.findings || [], null, 2)}`)
     .join('\n\n');
 
-  const prompt = crossFileReviewPrompt.replace('{{per_file_results}}', perFileText);
+  const prompt_text = crossFileReviewPrompt.replace('{{per_file_results}}', perFileText);
 
-  // File contents for cross-file analysis
   const fileContents = Object.entries(files)
     .map(([f, c]) => `### ${f}\n\`\`\`javascript\n${c}\n\`\`\``)
     .join('\n\n');
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2048,
-    messages: [
-      {
-        role: 'user',
-        content: `${prompt}
+  const prompt = `${prompt_text}
 
 ## File Contents
 ${fileContents}
@@ -235,16 +223,19 @@ Return ONLY cross-file findings as JSON:
       "confidence": <0-1>
     }
   ]
-}`,
-      },
-    ],
-  });
+}`;
 
-  const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
+
   let crossFileFindings = [];
 
   try {
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+    const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
     const result = JSON.parse(jsonMatch[1].trim());
     crossFileFindings = result.cross_file_findings || [];
     console.log(`  Found ${crossFileFindings.length} cross-file issues`);
@@ -266,22 +257,13 @@ async function runPhase3(allFindings, files) {
 
   const startTime = Date.now();
 
-  // ── EXAM KEY CONCEPT: This is a FRESH API call ──────────────────
+  // ── EXAM KEY CONCEPT: This is a FRESH query() call ──────────────────
   // No conversation history from Phase 1 or Phase 2.
-  // The verifier evaluates findings purely on their merits against the code.
-
   const fileContents = Object.entries(files)
     .map(([f, c]) => `### ${f}\n\`\`\`javascript\n${c}\n\`\`\``)
     .join('\n\n');
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 4096,
-    // No shared history -- this is the session isolation principle
-    messages: [
-      {
-        role: 'user',
-        content: `You are an independent code review verifier. You are reviewing findings
+  const prompt = `You are an independent code review verifier. You are reviewing findings
 that were produced by a separate review process. You have NOT seen these before.
 
 Your job:
@@ -321,16 +303,19 @@ Return JSON:
     "adjusted": <N>,
     "rejected": <N>
   }
-}`,
-      },
-    ],
-  });
+}`;
 
-  const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
+
   let verification = { verified_findings: [], summary: {} };
 
   try {
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+    const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
     verification = JSON.parse(jsonMatch[1].trim());
     const s = verification.summary || {};
     console.log(
@@ -353,13 +338,11 @@ function generateReport(perFileResults, crossFileFindings, verification) {
   console.log('Phase 4: Confidence Filtering and Report');
   console.log('─'.repeat(50));
 
-  // Count per-file findings
   let totalPerFile = 0;
   for (const result of Object.values(perFileResults)) {
     totalPerFile += result.findings?.length || 0;
   }
 
-  // Filter by confidence threshold
   const highConfidence = (verification.verified_findings || []).filter(
     f => f.confidence >= CONFIDENCE_THRESHOLD
   );
@@ -373,7 +356,6 @@ function generateReport(perFileResults, crossFileFindings, verification) {
   Low confidence (suppressed): ${lowConfidence.length}
 `);
 
-  // ── Build CI report ─────────────────────────────────────────────
   const hasCritical = highConfidence.some(
     f => (f.adjusted_severity || f.original_severity) === 'critical' &&
          f.verification_status !== 'rejected'
@@ -446,7 +428,7 @@ async function main() {
 
   const pipelineElapsed = Date.now() - pipelineStart;
   console.log(`\nTotal pipeline time: ${Math.round(pipelineElapsed / 1000)}s`);
-  console.log(`Total API calls: ${Object.keys(prFiles).length + 2} (${Object.keys(prFiles).length} per-file + 1 cross-file + 1 verification)`);
+  console.log(`Total query() calls: ${Object.keys(prFiles).length + 2} (${Object.keys(prFiles).length} per-file + 1 cross-file + 1 verification)`);
 
   console.log(`\n${'='.repeat(60)}`);
   console.log('EXPECTED FINDINGS FOR THIS PR');

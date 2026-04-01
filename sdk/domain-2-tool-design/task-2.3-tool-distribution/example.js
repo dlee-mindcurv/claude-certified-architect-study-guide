@@ -5,247 +5,163 @@
  * - Too many tools (18+) degrade selection reliability
  * - Scoped tool access (4-5 per agent) improves accuracy
  * - Cross-role tools (verify_fact) eliminate coordinator round-trips
- * - tool_choice forced selection ensures subagents use the right tool first
+ * - The agents config in query() options controls tool distribution
+ *
+ * EXAM KEY CONCEPT:
+ *   Use the `agents` option in query() to define subagents with scoped
+ *   tool sets. Each agent gets ONLY its relevant tools via its own
+ *   mcpServers or tools array. This prevents misrouting.
  *
  * This example demonstrates:
- * 1. Three subagent configurations, each with only their relevant tools
- * 2. Synthesis agent gets a scoped verify_fact cross-role tool
- * 3. tool_choice forced selection for the search agent's first step
- * 4. Comparison of giving all tools vs. scoped tools
+ * 1. Three subagent definitions, each with only their relevant tools
+ * 2. Synthesis agent gets a cross-role verify_fact tool
+ * 3. Comparison: scoped tools vs. giving all tools to one agent
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 import {
-  researchToolDefinitions,
-  executeResearchTool,
+  researchServer,
+  webSearchTool,
+  analyzeDocumentTool,
+  verifyFactTool,
 } from '../../../shared/tools/research-tools.js';
 
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
-const MAX_TURNS = 10;
+// ─── Scoped MCP Servers (one per agent role) ──────────────────────────────
+// EXAM KEY CONCEPT: Each subagent gets its OWN MCP server with ONLY its
+// relevant tools. This keeps each agent focused on 1-2 tools, not 18+.
 
-// ─── Tool Distribution ─────────────────────────────────────────────────────
-// Each subagent receives ONLY its relevant tools. The research-tools.js
-// exports 3 tools: web_search, analyze_document, verify_fact. In a real
-// system each role would have 4-5 tools; here we demonstrate the principle.
+const searchServer = createSdkMcpServer({
+  name: 'search',
+  version: '1.0.0',
+  tools: [webSearchTool],     // Search agent: web_search only
+});
 
-// Search agent: finds information
-const searchAgentTools = researchToolDefinitions.filter(
-  (t) => t.name === 'web_search'
-);
+const analysisServer = createSdkMcpServer({
+  name: 'analysis',
+  version: '1.0.0',
+  tools: [analyzeDocumentTool],  // Analysis agent: analyze_document only
+});
 
-// Analysis agent: analyzes documents in depth
-const analysisAgentTools = researchToolDefinitions.filter(
-  (t) => t.name === 'analyze_document'
-);
+const synthesisServer = createSdkMcpServer({
+  name: 'synthesis',
+  version: '1.0.0',
+  tools: [verifyFactTool],     // Synthesis agent: verify_fact (cross-role)
+});
 
-// Synthesis agent: combines findings + lightweight fact-checks
-// verify_fact is a CROSS-ROLE tool — avoids round-trips to coordinator
-const synthesisAgentTools = researchToolDefinitions.filter(
-  (t) => t.name === 'verify_fact'
-);
+// ─── Agent Definitions ────────────────────────────────────────────────────
+// EXAM KEY CONCEPT: The `agents` config in query() options defines
+// subagents with scoped tools. The coordinator delegates to them by name.
 
-// Anti-pattern: giving ALL tools to every agent
-const allTools = researchToolDefinitions;
+const searchAgent = {
+  description: 'Finds information via web search. Returns structured findings.',
+  prompt:
+    'You are a web search agent. Use web_search to find sources on the topic. ' +
+    'Return findings as JSON with claims, evidence, and source URLs.',
+  tools: ['mcp__search__web_search'],  // Scoped to search only
+  maxTurns: 3,
+};
 
-// ─── Subagent Runner ───────────────────────────────────────────────────────
-// Runs a subagent with its scoped tools and optional forced tool_choice.
+const analysisAgent = {
+  description: 'Analyzes documents in depth. Extracts claims with evidence and confidence.',
+  prompt:
+    'You are a document analysis agent. Use analyze_document to extract structured ' +
+    'findings with claim, evidence, confidence, and page reference.',
+  tools: ['mcp__analysis__analyze_document'],  // Scoped to analysis only
+  maxTurns: 3,
+};
 
-async function runSubagent({
-  label,
-  systemPrompt,
-  userMessage,
-  tools,
-  forcedTool = null,
-}) {
-  console.log(`\n  ┌── ${label} ──`);
-  console.log(`  │ Tools: [${tools.map((t) => t.name).join(', ')}]`);
-  if (forcedTool) {
-    console.log(`  │ tool_choice: forced → ${forcedTool}`);
-  }
-  console.log(`  │ Task: ${userMessage.substring(0, 70)}...`);
+const synthesisAgent = {
+  description: 'Combines findings into a report. Has verify_fact for quick checks.',
+  prompt:
+    'You are a synthesis agent. Combine findings into a report. ' +
+    'Use verify_fact for quick fact-checks (dates, stats). ' +
+    'For complex verification, note "requires further investigation."',
+  tools: ['mcp__synthesis__verify_fact'],  // Cross-role tool
+  maxTurns: 3,
+};
 
-  const messages = [{ role: 'user', content: userMessage }];
-  const toolCalls = [];
-  let turnCount = 0;
+// ─── Run: Scoped Tools (Correct Pattern) ──────────────────────────────────
 
-  while (true) {
-    if (++turnCount > MAX_TURNS) {
-      console.log(`  │ [WARNING] Safety limit after ${MAX_TURNS} turns`);
-      break;
-    }
+async function runScopedDemo() {
+  console.log('=== SCOPED TOOLS (correct pattern) ===\n');
+  console.log('Each subagent gets ONLY its relevant tools:');
+  console.log('  search-agent:    [web_search]');
+  console.log('  analysis-agent:  [analyze_document]');
+  console.log('  synthesis-agent: [verify_fact]  (cross-role)\n');
 
-    const requestParams = {
-      model: MODEL,
-      max_tokens: 2048,
-      system: systemPrompt,
-      tools,
-      messages,
-    };
-
-    // Force tool_choice on the FIRST turn only
-    if (turnCount === 1 && forcedTool) {
-      requestParams.tool_choice = { type: 'tool', name: forcedTool };
-    }
-    // Subsequent turns use auto
-    // (the subagent may need another call or may be done)
-
-    const response = await client.messages.create(requestParams);
-
-    if (response.stop_reason === 'end_turn') {
-      const text = response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n');
-      console.log(`  │ Result: ${text.substring(0, 100)}...`);
-      console.log(`  │ Tool calls: ${toolCalls.map((c) => c.name).join(' → ')}`);
-      console.log(`  └──`);
-      return { text, toolCalls };
-    }
-
-    if (response.stop_reason === 'tool_use') {
-      messages.push({ role: 'assistant', content: response.content });
-      const results = [];
-
-      for (const block of response.content.filter((b) => b.type === 'tool_use')) {
-        console.log(`  │ Turn ${turnCount}: ${block.name}(${JSON.stringify(block.input).substring(0, 60)})`);
-        toolCalls.push({ name: block.name, input: block.input });
-
-        const result = executeResearchTool(block.name, block.input);
-        results.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: result.content,
-          ...(result.isError && { is_error: true }),
-        });
-      }
-
-      messages.push({ role: 'user', content: results });
+  for await (const message of query({
+    prompt:
+      'Research "AI impact on creative industries in 2025". ' +
+      'First search for sources, then analyze document doc-001, ' +
+      'then synthesize findings and verify the claim that ' +
+      '"AI art tools market grew 47% year-over-year in 2024".',
+    options: {
+      mcpServers: [searchServer, analysisServer, synthesisServer],
+      agents: {
+        'search-agent': searchAgent,
+        'analysis-agent': analysisAgent,
+        'synthesis-agent': synthesisAgent,
+      },
+      maxTurns: 10,
+      hooks: {
+        postToolUse: async ({ toolName, toolInput }) => {
+          console.log(`  Tool: ${toolName}(${JSON.stringify(toolInput).substring(0, 60)})`);
+        },
+      },
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      console.log(`\n  Result: ${message.result.substring(0, 200)}...`);
     }
   }
-
-  return { text: '', toolCalls };
 }
 
-// ─── Demonstration: Scoped vs. All Tools ───────────────────────────────────
+// ─── Run: All Tools (Anti-Pattern) ────────────────────────────────────────
 
-async function demonstrateScopedTools() {
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  Task 2.3: Tool Distribution — Scoped vs. All Tools      ║');
-  console.log('╚════════════════════════════════════════════════════════════╝');
+async function runAllToolsDemo() {
+  console.log('\n\n=== ALL TOOLS (anti-pattern) ===\n');
+  console.log('Giving ALL 3 tools to a single agent. It may call');
+  console.log('analyze_document or verify_fact instead of searching first.\n');
 
-  const topic = 'AI impact on creative industries in 2025';
+  for await (const message of query({
+    prompt: 'Search for information about AI impact on creative industries in 2025.',
+    options: {
+      // Anti-pattern: one server with ALL tools, no scoping
+      mcpServers: [researchServer],
+      maxTurns: 5,
+      hooks: {
+        postToolUse: async ({ toolName }) => {
+          console.log(`  Tool: ${toolName}`);
+        },
+      },
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      console.log(`\n  Result: ${message.result.substring(0, 200)}...`);
+    }
+  }
+}
 
-  // ── Part 1: Scoped Tools (Correct Pattern) ────────────────────────────
-  console.log('\n═══ SCOPED TOOLS (4-5 per agent) ═══');
+// ─── Main ─────────────────────────────────────────────────────────────────
 
-  // Search agent: forced to use web_search on first turn
-  console.log('\n▶ Search Agent (web_search only, forced first call)');
-  const searchResult = await runSubagent({
-    label: 'Search Agent',
-    systemPrompt:
-      'You are a web search research agent. Find relevant sources on the assigned topic. ' +
-      'Return structured findings with claims, evidence, and source URLs.',
-    userMessage: `Search for information about: ${topic}`,
-    tools: searchAgentTools,
-    forcedTool: 'web_search', // Must search, cannot answer from memory
-  });
+async function main() {
+  console.log('Task 2.3: Tool Distribution — Scoped vs. All Tools\n');
 
-  // Analysis agent: scoped to analyze_document only
-  console.log('\n▶ Analysis Agent (analyze_document only)');
-  const analysisResult = await runSubagent({
-    label: 'Analysis Agent',
-    systemPrompt:
-      'You are a document analysis agent. Analyze documents and extract structured findings. ' +
-      'Each finding should include a claim, evidence, confidence level, and page reference.',
-    userMessage:
-      'Analyze document doc-001 focusing on market growth and production efficiency.',
-    tools: analysisAgentTools,
-    forcedTool: 'analyze_document',
-  });
+  await runScopedDemo();
+  await runAllToolsDemo();
 
-  // Synthesis agent: scoped to verify_fact (cross-role tool)
-  console.log('\n▶ Synthesis Agent (verify_fact cross-role tool)');
-  const synthesisResult = await runSubagent({
-    label: 'Synthesis Agent',
-    systemPrompt:
-      'You are a research synthesis agent. Combine findings into a coherent report. ' +
-      'Use verify_fact for quick fact-checks. For complex verification, note it as ' +
-      '"requires further investigation" rather than guessing.',
-    userMessage:
-      'Synthesize these findings into a report. Verify this claim: ' +
-      '"AI art tools market grew 47% year-over-year in 2024"',
-    tools: synthesisAgentTools,
-  });
-
-  // ── Part 2: All Tools (Anti-Pattern) ──────────────────────────────────
-  console.log('\n\n═══ ALL TOOLS (anti-pattern) ═══');
-  console.log(
-    '\nGiving ALL 3 tools to a single search agent. The agent may call'
-  );
-  console.log(
-    'analyze_document or verify_fact instead of searching first.\n'
-  );
-
-  const allToolsResult = await runSubagent({
-    label: 'Search Agent (ALL tools)',
-    systemPrompt:
-      'You are a web search research agent. Find relevant sources on the assigned topic.',
-    userMessage: `Search for information about: ${topic}`,
-    tools: allTools,
-    // No forced tool_choice — agent picks freely from all tools
-  });
-
-  // ── Analysis ──────────────────────────────────────────────────────────
-  console.log('\n\n' + '='.repeat(60));
-  console.log('ANALYSIS: Scoped vs. All Tools');
+  console.log('\n' + '='.repeat(60));
+  console.log('KEY TAKEAWAYS (exam)');
   console.log('='.repeat(60));
-
   console.log(`
-  SCOPED TOOLS:
-    Search agent:    [web_search] — forced first call
-    Analysis agent:  [analyze_document] — forced first call
-    Synthesis agent: [verify_fact] — cross-role tool for quick checks
-
-  ALL TOOLS (anti-pattern):
-    Search agent:    [web_search, analyze_document, verify_fact]
-    No forced tool_choice
-
-  Results:
-    Scoped search agent first call: ${searchResult.toolCalls[0]?.name || 'none'}
-    All-tools agent first call:     ${allToolsResult.toolCalls[0]?.name || 'none'}
-  `);
-
-  if (searchResult.toolCalls[0]?.name === 'web_search') {
-    console.log('  Scoped agent correctly called web_search first (forced).');
-  }
-
-  if (allToolsResult.toolCalls[0]?.name !== 'web_search') {
-    console.log(
-      `  All-tools agent called ${allToolsResult.toolCalls[0]?.name} instead of web_search.`
-    );
-    console.log(
-      '  This is the misrouting problem — with all tools available, the agent'
-    );
-    console.log('  may choose a different tool than intended for its role.');
-  } else {
-    console.log(
-      '  All-tools agent happened to call web_search, but this is not guaranteed.'
-    );
-    console.log(
-      '  Without forced tool_choice and scoped tools, misrouting can occur'
-    );
-    console.log('  non-deterministically on different runs.');
-  }
-
-  console.log(`
-  KEY TAKEAWAYS:
-  1. Scope each agent to 4-5 tools for reliable selection
-  2. Use forced tool_choice for deterministic first-step behavior
-  3. Cross-role tools (verify_fact) eliminate coordinator round-trips
-  4. All-tools pattern increases misrouting risk, especially at scale
+  1. Scope each agent to 4-5 tools max for reliable selection
+  2. Use separate MCP servers per agent role (createSdkMcpServer)
+  3. Use agents config in query() options for subagent definitions
+  4. Cross-role tools (verify_fact) eliminate coordinator round-trips
+  5. All-tools pattern (18+ tools) increases misrouting risk
+  6. Each agent's tools array restricts which tools it can call
   `);
 }
 
-demonstrateScopedTools().catch(console.error);
+main().catch(console.error);

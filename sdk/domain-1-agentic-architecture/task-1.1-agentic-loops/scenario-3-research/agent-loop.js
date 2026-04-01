@@ -1,27 +1,21 @@
 /**
- * Scenario 3: Research Coordinator — Agentic Loop
+ * Scenario 3: Research Agent -- Single-Agent Agentic Loop via Agent SDK
  *
  * Exam relevance (Task 1.1):
  * - Demonstrates an agentic loop in a research/knowledge context
- * - Same stop_reason-driven pattern as CSR, different domain
+ * - Same query() pattern as the CSR scenario, different domain
  * - Uses research tools (web_search, analyze_document, verify_fact)
- * - Shows how the SAME loop structure works across different scenarios
  *
- * This is a single-agent research loop (not the multi-agent coordinator
- * from Task 1.2). It shows one agent using all research tools directly.
+ * EXAM KEY CONCEPT:
+ *   The agentic loop structure is IDENTICAL across scenarios. Only the
+ *   tools, system prompt, and domain logic change. query() abstracts
+ *   the loop the same way regardless of domain.
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
-import { researchToolDefinitions, executeResearchTool } from '../../../../shared/tools/research-tools.js';
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
-const MAX_TURNS = 20;
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { researchServer } from '../../../../shared/tools/research-tools.js';
 
 // ─── Research Agent System Prompt ───────────────────────────────────────────
-// A simplified single-agent prompt (the full multi-agent coordinator prompt
-// is in shared/prompts/research-coordinator.js and used in Task 1.2)
 
 const researchAgentPrompt = `You are a research agent with access to web search, document analysis, and fact verification tools.
 
@@ -44,97 +38,44 @@ Provide a structured research summary with:
 - Gaps in coverage
 - List of sources consulted`;
 
-// ─── Agentic Loop for Research Scenario ─────────────────────────────────────
+// ─── Research Agent via query() ─────────────────────────────────────────────
 
-async function runResearchAgent(query) {
+async function runResearchAgent(researchQuery) {
   console.log('\n' + '='.repeat(60));
-  console.log('Research Agent — Scenario 3 (Single-Agent Loop)');
+  console.log('Research Agent -- Scenario 3 (Agent SDK)');
   console.log('='.repeat(60));
-  console.log(`\nQuery: ${query}\n`);
+  console.log(`\nQuery: ${researchQuery}\n`);
 
-  const messages = [{ role: 'user', content: query }];
+  let finalText = '';
 
-  const toolCallLog = [];
-  let turnCount = 0;
+  // EXAM KEY CONCEPT: Same query() pattern as CSR, different tools and prompt
+  for await (const message of query({
+    prompt: researchQuery,
+    options: {
+      systemPrompt: researchAgentPrompt,
 
-  // ── Same core pattern as the CSR loop ───────────────────────────────────
-  // EXAM KEY CONCEPT: The agentic loop structure is IDENTICAL across scenarios.
-  // Only the tools, system prompt, and domain logic change.
+      // researchServer bundles: web_search, analyze_document, verify_fact
+      mcpServers: {
+        research: researchServer,
+      },
 
-  while (true) {
-    if (++turnCount > MAX_TURNS) {
-      console.warn(`[SAFETY] Max turns (${MAX_TURNS}) reached.`);
-      break;
+      allowedTools: [
+        'mcp__research__web_search',
+        'mcp__research__analyze_document',
+        'mcp__research__verify_fact',
+      ],
+
+      maxTurns: 20,
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      finalText = message.result;
     }
-
-    console.log(`\n--- Turn ${turnCount} ---`);
-
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 4096,
-      system: researchAgentPrompt,
-      tools: researchToolDefinitions,
-      messages,
-    });
-
-    // ── stop_reason-driven control (identical pattern) ────────────────────
-
-    if (response.stop_reason === 'end_turn') {
-      const finalText = response.content
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('\n');
-
-      console.log(`\nResearch Report:\n${finalText}`);
-      console.log(`\n--- Research complete in ${turnCount} turns ---`);
-      console.log('Tool sequence:', toolCallLog.map(t => t.name).join(' → '));
-      return { text: finalText, toolCalls: toolCallLog, turns: turnCount };
-    }
-
-    if (response.stop_reason === 'tool_use') {
-      messages.push({ role: 'assistant', content: response.content });
-
-      const toolResults = [];
-      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
-
-      for (const toolUse of toolUseBlocks) {
-        console.log(`  [Turn ${turnCount}] ${toolUse.name}(${JSON.stringify(toolUse.input)})`);
-
-        const result = executeResearchTool(toolUse.name, toolUse.input);
-
-        toolCallLog.push({
-          name: toolUse.name,
-          input: toolUse.input,
-          isError: result.isError || false,
-          turn: turnCount,
-        });
-
-        if (result.isError) {
-          const parsed = JSON.parse(result.content);
-          console.log(`    ERROR [${parsed.errorCategory}]: ${parsed.message}`);
-
-          // EXAM NOTE: For transient errors in research, the agent should
-          // try alternative queries rather than just retrying the same one.
-          // This is handled by Claude's reasoning, not by loop logic.
-        } else {
-          console.log(`    OK: ${result.content.substring(0, 100)}...`);
-        }
-
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: result.content,
-          ...(result.isError && { is_error: true }),
-        });
-      }
-
-      messages.push({ role: 'user', content: toolResults });
-      continue;
-    }
-
-    console.error(`Unexpected stop_reason: ${response.stop_reason}`);
-    break;
   }
+
+  console.log(`\nResearch Report:\n${finalText}`);
+  console.log('\n--- Research complete ---');
+  return finalText;
 }
 
 // ─── Run ────────────────────────────────────────────────────────────────────

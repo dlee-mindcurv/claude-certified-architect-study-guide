@@ -7,13 +7,27 @@ Working examples, exercises, and documentation covering all 5 domains and 6 scen
 ```bash
 npm install
 cp .env.example .env  # Add your ANTHROPIC_API_KEY
+
+# Agent SDK examples (recommended starting point)
+node sdk/domain-1-agentic-architecture/task-1.1-agentic-loops/example-agent-sdk.js
+
+# Raw API examples (for comparison)
 node sdk/domain-1-agentic-architecture/task-1.1-agentic-loops/example-raw-api.js
 ```
+
+## SDK Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `@anthropic-ai/claude-agent-sdk` | Agent SDK — query(), tool(), createSdkMcpServer(), hooks, subagents |
+| `@anthropic-ai/sdk` | Raw API — client.messages.create(), batch API, tool_use schemas |
+
+Agent SDK examples use `import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'`.
+Raw API examples use `import Anthropic from '@anthropic-ai/sdk'`.
 
 ## Structure
 
 ### `sdk/` — Node SDK Examples
-Examples using `@anthropic-ai/sdk` (raw API) and Claude Agent SDK patterns.
 
 | Directory | Domain | Weight |
 |-----------|--------|--------|
@@ -23,7 +37,6 @@ Examples using `@anthropic-ai/sdk` (raw API) and Claude Agent SDK patterns.
 | `sdk/domain-5-context-reliability/` | Context Management & Reliability | 15% |
 
 ### `claude/` — Native Claude Code Examples
-Configuration files, rules, commands, and skills for Claude Code workflows.
 
 | Directory | Domain | Weight |
 |-----------|--------|--------|
@@ -32,10 +45,10 @@ Configuration files, rules, commands, and skills for Claude Code workflows.
 | `claude/domain-5-context-reliability/` | Codebase context management | 15% |
 
 ### `exercises/` — Preparation Exercises
-The 4 hands-on exercises from the exam guide, each with starter code and solutions.
+4 hands-on exercises with starter code and solutions.
 
 ### `shared/` — Reusable Components
-Mock tools, JSON schemas, and system prompts shared across examples.
+Mock MCP tools (using `tool()` + `createSdkMcpServer()`), JSON schemas, and system prompts.
 
 ## 6 Exam Scenarios
 
@@ -49,6 +62,10 @@ Mock tools, JSON schemas, and system prompts shared across examples.
 | 6 | Structured Data Extraction | Claude API | D4, D5 |
 
 See `documentation/SCENARIO_DOMAIN_MAP.md` for the full cross-reference matrix.
+
+## Progress
+
+- [x] `sdk/domain-1-agentic-architecture/task-1.1-agentic-loops` — Complete
 
 ## Study Approach
 

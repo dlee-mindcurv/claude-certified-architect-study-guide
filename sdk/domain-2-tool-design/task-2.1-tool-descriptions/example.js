@@ -7,224 +7,188 @@
  * - Good descriptions include: input formats, edge cases, boundaries,
  *   when-to-use guidance, and prerequisites
  *
+ * EXAM KEY CONCEPT:
+ *   tool() description strings are the LLM's ONLY guide for routing.
+ *   Include: what it does, accepted formats, prerequisites, boundaries,
+ *   and routing guidance vs. other tools.
+ *
  * This example demonstrates:
- * 1. BEFORE: Minimal descriptions → agent confuses get_customer and lookup_order
- * 2. AFTER:  Expanded descriptions → agent correctly routes the same query
- * 3. Both tested with the SAME ambiguous query: "check my order #12345"
+ * 1. BEFORE: Minimal descriptions -> agent confuses get_customer and lookup_order
+ * 2. AFTER:  Expanded descriptions -> agent correctly routes the same query
+ * 3. Both tested with the SAME ambiguous query
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
-import { executeCsrTool } from '../../../shared/tools/csr-tools.js';
+import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
-const MAX_TURNS = 10;
+// ─── Mock Data ────────────────────────────────────────────────────────────
 
-// ─── BEFORE: Minimal Descriptions ──────────────────────────────────────────
-// These descriptions are vague and overlapping. Both "retrieve information."
+const customers = {
+  'C-1001': { id: 'C-1001', name: 'Alice Johnson', email: 'alice@example.com', tier: 'gold' },
+};
+const orders = {
+  'ORD-5001': { orderId: 'ORD-5001', customerId: 'C-1001', total: 105.97, status: 'delivered' },
+};
+
+function ok(data) {
+  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+}
+function err(msg) {
+  return { content: [{ type: 'text', text: JSON.stringify({ error: msg }) }], isError: true };
+}
+
+// ─── BEFORE: Minimal (Vague) Descriptions ─────────────────────────────────
+// These descriptions are vague and overlapping. Both say "retrieves."
 // Neither specifies accepted input formats, prerequisites, or boundaries.
 
-const minimalTools = [
+const vagueGetCustomer = tool(
+  'get_customer',
+  'Retrieves customer information',                       // BAD: vague
   {
-    name: 'get_customer',
-    description: 'Retrieves customer information',
-    input_schema: {
-      type: 'object',
-      properties: {
-        email: { type: 'string', description: 'Email address' },
-        customer_id: { type: 'string', description: 'Customer ID' },
-      },
-    },
+    email: z.string().optional().describe('Email address'),
+    customer_id: z.string().optional().describe('Customer ID'),
   },
-  {
-    name: 'lookup_order',
-    description: 'Retrieves order details',
-    input_schema: {
-      type: 'object',
-      properties: {
-        order_id: { type: 'string', description: 'Order ID' },
-        customer_id: { type: 'string', description: 'Customer ID' },
-      },
-      required: ['order_id', 'customer_id'],
-    },
+  async ({ email, customer_id }) => {
+    if (customer_id && customers[customer_id]) return ok(customers[customer_id]);
+    const match = Object.values(customers).find(c => c.email === email);
+    return match ? ok(match) : err('Customer not found');
   },
-];
+);
 
-// ─── AFTER: Expanded Descriptions ──────────────────────────────────────────
+const vagueLookupOrder = tool(
+  'lookup_order',
+  'Retrieves order details',                              // BAD: vague
+  {
+    order_id: z.string().describe('Order ID'),
+    customer_id: z.string().describe('Customer ID'),
+  },
+  async ({ order_id, customer_id }) => {
+    const order = orders[order_id];
+    if (!order) return err('Order not found');
+    if (order.customerId !== customer_id) return err('Permission denied');
+    return ok(order);
+  },
+);
+
+// ─── AFTER: Expanded (Precise) Descriptions ───────────────────────────────
 // Each description specifies: what it does, accepted formats, prerequisites,
 // boundaries, and routing guidance vs. the other tools.
 
-const expandedTools = [
+const preciseGetCustomer = tool(
+  'get_customer',
+  // EXAM KEY CONCEPT: 5 components of an effective tool description
+  'Look up a customer by email or customer ID (format: C-XXXX). ' +         // 1. What it does + formats
+  'Returns profile with name, tier, and account status. ' +                  // 2. What it returns
+  'Call BEFORE any order lookups or refunds to verify identity. ' +          // 3. Prerequisites
+  'Does NOT accept order numbers — use lookup_order for order queries.',     // 4. Boundaries + routing
   {
-    name: 'get_customer',
-    description:
-      'Look up a customer account by their email address or customer ID ' +
-      '(format: C-XXXX). Returns customer profile including name, email, ' +
-      'account tier (standard/gold/platinum), and account status. ' +
-      'Use this BEFORE any order lookups or refund processing to verify ' +
-      'customer identity. If multiple customers match a name, returns all ' +
-      'matches -- ask for email or customer ID to disambiguate. ' +
-      'Does NOT accept order numbers -- use lookup_order for order queries.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        email: {
-          type: 'string',
-          description: 'Customer email address for lookup (e.g., alice@example.com)',
-        },
-        customer_id: {
-          type: 'string',
-          description: 'Customer ID in format C-XXXX (e.g., C-1001)',
-        },
-      },
-    },
+    email: z.string().optional().describe('Customer email (e.g., alice@example.com)'),
+    customer_id: z.string().optional().describe('Customer ID in format C-XXXX'),
   },
+  async ({ email, customer_id }) => {
+    if (customer_id && customers[customer_id]) return ok(customers[customer_id]);
+    const match = Object.values(customers).find(c => c.email === email);
+    return match ? ok(match) : err('Customer not found');
+  },
+);
+
+const preciseLookupOrder = tool(
+  'lookup_order',
+  'Look up an order by order number (format: ORD-XXXX). ' +
+  'Returns items, total, status, and delivery info. ' +
+  'Requires a verified customer_id from a prior get_customer call — ' +
+  'will fail if the order does not belong to the specified customer. ' +
+  'Accepts ONLY order numbers, not customer names or emails.',
   {
-    name: 'lookup_order',
-    description:
-      'Look up an order by its order number (format: ORD-XXXX). Returns ' +
-      'order details including items, total amount, status ' +
-      '(pending/shipped/delivered/cancelled), tracking info, and delivery date. ' +
-      'Requires a verified customer ID from a prior get_customer call -- ' +
-      'will fail if the order does not belong to the specified customer. ' +
-      'Accepts ONLY order numbers, not customer names or emails.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        order_id: {
-          type: 'string',
-          description: 'Order number in format ORD-XXXX (e.g., ORD-5001)',
-        },
-        customer_id: {
-          type: 'string',
-          description: 'Verified customer ID from get_customer (format: C-XXXX)',
-        },
-      },
-      required: ['order_id', 'customer_id'],
-    },
+    order_id: z.string().describe('Order number (format: ORD-XXXX)'),
+    customer_id: z.string().describe('Verified customer ID from get_customer (C-XXXX)'),
   },
-];
+  async ({ order_id, customer_id }) => {
+    const order = orders[order_id];
+    if (!order) return err('Order not found');
+    if (order.customerId !== customer_id) return err('Permission denied');
+    return ok(order);
+  },
+);
 
-// ─── Agent Loop ────────────────────────────────────────────────────────────
-// Runs a simple agentic loop and tracks which tools were called in order.
+// ─── Build MCP Servers ────────────────────────────────────────────────────
 
-async function runWithTools(label, tools, userMessage) {
+const vagueServer = createSdkMcpServer({
+  name: 'csr-vague',
+  version: '1.0.0',
+  tools: [vagueGetCustomer, vagueLookupOrder],
+});
+
+const preciseServer = createSdkMcpServer({
+  name: 'csr-precise',
+  version: '1.0.0',
+  tools: [preciseGetCustomer, preciseLookupOrder],
+});
+
+// ─── Run Comparison ───────────────────────────────────────────────────────
+// The SAME ambiguous query is tested with both tool sets.
+// With vague descriptions, the agent may call lookup_order directly
+// (which fails because no customer_id was verified first).
+// With precise descriptions, the agent calls get_customer first.
+
+async function runWithServer(label, mcpServer) {
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`${label}`);
-  console.log(`User: "${userMessage}"`);
+  console.log(label);
   console.log('='.repeat(60));
 
-  const messages = [{ role: 'user', content: userMessage }];
-  const toolCallLog = [];
-  let turnCount = 0;
+  const toolLog = [];
 
-  while (true) {
-    if (++turnCount > MAX_TURNS) {
-      console.warn(`  [WARNING] Safety limit reached after ${MAX_TURNS} turns`);
-      break;
-    }
-
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      system:
-        'You are a customer support agent. Use the available tools to help customers. ' +
-        'Always verify customer identity before looking up orders.',
-      tools,
-      messages,
-    });
-
-    if (response.stop_reason === 'end_turn') {
-      const text = response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n');
-      console.log(`\n  Final response: ${text.substring(0, 200)}...`);
-      break;
-    }
-
-    if (response.stop_reason === 'tool_use') {
-      messages.push({ role: 'assistant', content: response.content });
-      const toolResults = [];
-
-      for (const block of response.content.filter((b) => b.type === 'tool_use')) {
-        console.log(`  Turn ${turnCount}: ${block.name}(${JSON.stringify(block.input)})`);
-        toolCallLog.push({ tool: block.name, input: block.input });
-
-        const result = executeCsrTool(block.name, block.input);
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: result.content,
-          ...(result.isError && { is_error: true }),
-        });
-      }
-
-      messages.push({ role: 'user', content: toolResults });
+  for await (const message of query({
+    prompt:
+      'Can you check my order ORD-5001? My email is alice@example.com',
+    options: {
+      mcpServers: [mcpServer],
+      maxTurns: 6,
+      hooks: {
+        // Log every tool call so we can compare routing order
+        postToolUse: async ({ toolName, toolInput }) => {
+          toolLog.push(toolName);
+          console.log(`  Tool call: ${toolName}(${JSON.stringify(toolInput)})`);
+        },
+      },
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      console.log(`\n  Final: ${message.result.substring(0, 150)}...`);
     }
   }
 
-  console.log(`\n  Tool call order: ${toolCallLog.map((c) => c.tool).join(' → ')}`);
-  return toolCallLog;
+  console.log(`  Tool call order: ${toolLog.join(' -> ')}`);
+  return toolLog;
 }
 
-// ─── Run Comparison ────────────────────────────────────────────────────────
-// The SAME ambiguous query is tested with both tool sets.
-// With minimal descriptions, the agent often calls lookup_order directly
-// (which fails because no customer_id was verified).
-// With expanded descriptions, the agent calls get_customer first.
-
 async function main() {
-  const ambiguousQuery =
-    'Can you check my order ORD-5001? My email is alice@example.com';
+  console.log('Task 2.1: Tool Description Quality — Before vs. After');
+  console.log('Test query: "Can you check my order ORD-5001? My email is alice@example.com"');
+  console.log('Correct sequence: get_customer(email) -> lookup_order(order_id, customer_id)\n');
 
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  Task 2.1: Tool Description Quality — Before vs. After   ║');
-  console.log('╚════════════════════════════════════════════════════════════╝');
-  console.log(`\nTest query: "${ambiguousQuery}"`);
-  console.log('This query mentions BOTH an order number AND an email.');
-  console.log('The correct sequence: get_customer(email) → lookup_order(order_id, customer_id)');
-
-  // BEFORE: Minimal descriptions
-  const minimalLog = await runWithTools(
-    'BEFORE: Minimal descriptions',
-    minimalTools,
-    ambiguousQuery
-  );
-
-  // AFTER: Expanded descriptions
-  const expandedLog = await runWithTools(
-    'AFTER: Expanded descriptions',
-    expandedTools,
-    ambiguousQuery
-  );
+  const vagueLog = await runWithServer('BEFORE: Vague descriptions', vagueServer);
+  const preciseLog = await runWithServer('AFTER: Precise descriptions', preciseServer);
 
   // ── Analysis ──────────────────────────────────────────────────────────
   console.log(`\n${'='.repeat(60)}`);
   console.log('ANALYSIS');
   console.log('='.repeat(60));
 
-  const minimalFirst = minimalLog[0]?.tool || 'none';
-  const expandedFirst = expandedLog[0]?.tool || 'none';
+  const vagueFirst = vagueLog[0]?.replace(/^mcp__csr-vague__/, '') || 'none';
+  const preciseFirst = preciseLog[0]?.replace(/^mcp__csr-precise__/, '') || 'none';
 
-  console.log(`\n  Minimal descriptions — first tool called: ${minimalFirst}`);
-  console.log(`  Expanded descriptions — first tool called: ${expandedFirst}`);
+  console.log(`  Vague first tool:   ${vagueFirst}`);
+  console.log(`  Precise first tool: ${preciseFirst}`);
 
-  if (expandedFirst === 'get_customer') {
-    console.log('\n  RESULT: Expanded descriptions correctly routed to get_customer first.');
-    console.log('  The prerequisite ("Use this BEFORE any order lookups") guided Claude');
-    console.log('  to verify customer identity before looking up the order.');
-  }
-
-  if (minimalFirst === 'lookup_order') {
-    console.log('\n  NOTE: Minimal descriptions may have routed directly to lookup_order.');
-    console.log('  Without prerequisite guidance, Claude tried to look up the order');
-    console.log('  without a verified customer ID, which would fail with a permission error.');
-  }
-
-  console.log('\n  KEY TAKEAWAY: Tool descriptions are the primary selection mechanism.');
-  console.log('  Include input formats, prerequisites, boundaries, and routing guidance.');
+  // EXAM KEY CONCEPT: Description quality determines routing accuracy
+  console.log(`
+  KEY TAKEAWAY (exam):
+  - Tool descriptions are the PRIMARY selection mechanism
+  - Include: input formats, prerequisites, boundaries, routing guidance
+  - "Call BEFORE any order lookups" creates prerequisite ordering
+  - "Does NOT accept order numbers" prevents misrouting
+  `);
 }
 
 main().catch(console.error);

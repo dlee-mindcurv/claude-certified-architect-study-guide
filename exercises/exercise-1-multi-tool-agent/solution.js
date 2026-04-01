@@ -1,213 +1,111 @@
 /**
- * Exercise 1 — SOLUTION: Build a Multi-Tool Agent with Escalation Logic
+ * Exercise 1 — SOLUTION: Multi-Tool Agent with Escalation Logic
  *
  * Domains: D1 (Agentic Architecture), D2 (Tool Design), D5 (Context Management)
  *
- * This is the complete working implementation.
- * Run with: node exercises/exercise-1-multi-tool-agent/solution.js
+ * Uses @anthropic-ai/claude-agent-sdk query() with mock CSR MCP tools
+ * and a PreToolUse hook for deterministic refund threshold enforcement.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
-import 'dotenv/config';
-import { csrToolDefinitions, executeCsrTool } from '../../shared/tools/csr-tools.js';
-import { createErrorResponse } from '../../shared/schemas/error-response.js';
-import { csrSystemPrompt } from '../../shared/prompts/csr-system-prompt.js';
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { csrServer } from '../../shared/tools/csr-tools.js';
 
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
-const MAX_ITERATIONS = 15;
-const REFUND_ESCALATION_THRESHOLD = 100; // dollars
+const REFUND_THRESHOLD = 100;
 
-// ─── Step 1: Tool Definitions ───────────────────────────────────────────────
+// ─── PreToolUse Hook: Refund Threshold ─────────────────────────────────────
 //
-// The tool definitions in csrToolDefinitions use these key disambiguation techniques:
-//
-// a) Negative instructions ("Does NOT accept order numbers"):
-//    Prevents the model from sending the wrong input type to a tool when two tools
-//    handle similar entities. Without this, the model might try to pass an order ID
-//    to get_customer.
-//
-// b) Precondition statements ("Requires a verified customer ID from get_customer"):
-//    Establishes execution order — the model learns it must call get_customer first.
-//    This prevents authorization errors from calling lookup_order without a valid
-//    customer_id.
-//
-// c) Format examples ("format: C-XXXX"):
-//    Reduces validation errors by showing the expected input pattern. The model can
-//    extract and format IDs correctly from natural language.
+// EXAM KEY CONCEPT: Hooks are deterministic — the model CANNOT bypass them.
+// This is unlike prompt instructions which are probabilistic.
 
-// ─── Step 2: Agentic Loop ──────────────────────────────────────────────────
-
-/**
- * Run the agentic loop: send messages to Claude, handle tool calls, repeat.
- */
-async function runAgentLoop(userMessage) {
-  const messages = [{ role: 'user', content: userMessage }];
-  let iterations = 0;
-
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`Customer: ${userMessage}`);
-  console.log('='.repeat(60));
-
-  while (iterations < MAX_ITERATIONS) {
-    iterations++;
-    console.log(`\n--- Iteration ${iterations} ---`);
-
-    // Step 2a: Call the Claude API
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 4096,
-      system: csrSystemPrompt,
-      tools: csrToolDefinitions,
-      messages,
-    });
-
-    console.log(`  stop_reason: ${response.stop_reason}`);
-
-    // Step 2b: Check stop_reason
-    if (response.stop_reason === 'end_turn') {
-      // Extract text content from the response
-      const textBlocks = response.content.filter((block) => block.type === 'text');
-      const finalResponse = textBlocks.map((b) => b.text).join('\n');
-      console.log(`  Agent says: ${finalResponse.substring(0, 200)}...`);
-      return finalResponse;
-    }
-
-    if (response.stop_reason === 'tool_use') {
-      // Push the assistant's full response (including tool_use blocks) onto messages
-      messages.push({ role: 'assistant', content: response.content });
-
-      // Process each tool_use block
-      const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use');
-      const toolResults = [];
-
-      for (const toolUse of toolUseBlocks) {
-        const result = executeToolWithErrorHandling(toolUse.name, toolUse.input, toolUse.id);
-        toolResults.push(result);
-      }
-
-      // Push all tool results back as a single user message
-      messages.push({ role: 'user', content: toolResults });
-    }
-  }
-
-  if (iterations >= MAX_ITERATIONS) {
-    console.log('Max iterations reached — forcing end.');
-    return 'I apologize, but I was unable to complete your request. Let me connect you with a human agent.';
-  }
-}
-
-// ─── Step 3: Error Response Handling ────────────────────────────────────────
-
-/**
- * Execute a tool call and return the result formatted for the messages array.
- */
-function executeToolWithErrorHandling(toolName, toolInput, toolUseId) {
-  console.log(`  Tool: ${toolName}(${JSON.stringify(toolInput)})`);
-
-  // Step 4: Check escalation hook BEFORE executing
-  const blocked = checkEscalationHook(toolName, toolInput);
-  if (blocked) {
+async function refundGuardHook(input, toolUseID, { signal }) {
+  const amount = input.tool_input?.amount;
+  if (typeof amount === 'number' && amount > REFUND_THRESHOLD) {
+    console.log(`  [HOOK] Blocked refund $${amount} (limit: $${REFUND_THRESHOLD})`);
     return {
-      type: 'tool_result',
-      tool_use_id: toolUseId,
-      content: blocked.content,
-      is_error: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason:
+          `Refund of $${amount} exceeds the $${REFUND_THRESHOLD} auto-approval limit. ` +
+          `Please escalate to a human agent.`,
+      },
     };
   }
-
-  // Step 3: Execute the tool
-  const result = executeCsrTool(toolName, toolInput);
-
-  if (result.isError) {
-    const errorData = JSON.parse(result.content);
-    console.log(`  ERROR [${errorData.errorCategory}] retryable=${errorData.isRetryable}: ${errorData.message}`);
-  } else {
-    const data = JSON.parse(result.content);
-    console.log(`  Result: ${JSON.stringify(data).substring(0, 150)}...`);
-  }
-
-  return {
-    type: 'tool_result',
-    tool_use_id: toolUseId,
-    content: result.content,
-    is_error: result.isError || false,
-  };
+  return {}; // allow
 }
 
-// ─── Step 4: Escalation Hook ────────────────────────────────────────────────
+// ─── Run Agent ─────────────────────────────────────────────────────────────
 
-/**
- * Pre-execution hook that checks if a refund should be blocked and escalated.
- */
-function checkEscalationHook(toolName, toolInput) {
-  if (toolName === 'process_refund' && toolInput.amount > REFUND_ESCALATION_THRESHOLD) {
-    console.log(`  HOOK: Blocking refund of $${toolInput.amount} (threshold: $${REFUND_ESCALATION_THRESHOLD})`);
+async function runAgent(userMessage) {
+  console.log(`\nCustomer: ${userMessage}\n`);
 
-    return createErrorResponse({
-      errorCategory: 'business',
-      isRetryable: false,
-      message:
-        `Refund of $${toolInput.amount} exceeds the $${REFUND_ESCALATION_THRESHOLD} ` +
-        `auto-approval threshold. This refund requires human approval. ` +
-        `Please escalate to a human agent with the refund details.`,
-      context: {
-        blocked_amount: toolInput.amount,
-        threshold: REFUND_ESCALATION_THRESHOLD,
-        required_action: 'escalate_to_human',
+  for await (const message of query({
+    prompt: userMessage,
+    options: {
+      // Provide the CSR MCP server with all 4 tools
+      mcpServers: { csr: csrServer },
+
+      // Auto-allow all CSR tools (no permission prompts)
+      allowedTools: [
+        'mcp__csr__get_customer',
+        'mcp__csr__lookup_order',
+        'mcp__csr__process_refund',
+        'mcp__csr__escalate_to_human',
+      ],
+
+      // Hooks for deterministic enforcement
+      hooks: {
+        PreToolUse: [{
+          matcher: 'mcp__csr__process_refund',
+          hooks: [refundGuardHook],
+        }],
       },
-    });
+
+      permissionMode: 'bypassPermissions',
+      maxTurns: 15,
+    },
+  })) {
+    // Log assistant messages for visibility
+    if (message.type === 'assistant') {
+      for (const block of message.message.content) {
+        if (block.type === 'tool_use') {
+          console.log(`  Tool call: ${block.name}(${JSON.stringify(block.input).slice(0, 80)})`);
+        }
+      }
+    }
+
+    // Return the final result
+    if (message.type === 'result' && message.subtype === 'success') {
+      return message.result;
+    }
   }
 
-  return null;
+  return '[Agent did not produce a result]';
 }
 
-// ─── Step 5: Test Scenarios ─────────────────────────────────────────────────
+// ─── Test Scenarios ────────────────────────────────────────────────────────
 
-const testScenarios = [
-  // Scenario A: Simple order status check
+const scenarios = [
+  // A: Simple order status check
   'Hi, my email is alice@example.com. Can you check the status of order ORD-5002?',
-
-  // Scenario B: Refund under threshold (should process directly)
-  "I'm customer C-1002 and I want a refund for order ORD-5003. The keyboard arrived with a broken spacebar. Refund amount: $50.",
-
-  // Scenario C: Refund over threshold (should trigger escalation hook)
-  "I'm customer C-1001 and I need a full refund of $105.97 for order ORD-5001. The headphones stopped working.",
-
-  // Scenario D: Multi-concern message
-  "I'm alice@example.com. I need a refund for the damaged headphones in order ORD-5001 (refund $79.99), and also can you check where my order ORD-5002 is?",
-
-  // Scenario E: Ambiguous customer (multiple matches by name)
-  'Hi, my name is Alice Johnson. I need help with my recent order.',
+  // B: Refund under threshold (processes directly)
+  "I'm customer C-1002 and I want a $50 refund for order ORD-5003. Broken spacebar.",
+  // C: Refund over threshold (hook blocks, agent should escalate)
+  "I'm customer C-1001, refund $105.97 for order ORD-5001. Headphones stopped working.",
+  // D: Multi-concern
+  "I'm alice@example.com. Refund $79.99 for damaged headphones in ORD-5001, and check ORD-5002 status.",
 ];
-
-// ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log('Exercise 1 — SOLUTION: Multi-Tool Agent with Escalation Logic\n');
+  const idx = parseInt(process.argv[2] || '0', 10);
+  const scenario = scenarios[idx] || scenarios[0];
 
-  // Run one scenario at a time. Change the index to test different scenarios.
-  const scenarioIndex = parseInt(process.argv[2] || '0', 10);
-  const scenario = testScenarios[scenarioIndex];
-
-  if (!scenario) {
-    console.log(`Invalid scenario index. Choose 0-${testScenarios.length - 1}`);
-    console.log(testScenarios.map((s, i) => `  ${i}: ${s.substring(0, 60)}...`).join('\n'));
-    return;
-  }
-
-  try {
-    const result = await runAgentLoop(scenario);
-    console.log(`\n${'='.repeat(60)}`);
-    console.log('FINAL AGENT RESPONSE:');
-    console.log('='.repeat(60));
-    console.log(result);
-  } catch (error) {
-    console.error('Error:', error.message);
-    if (error.status === 401) {
-      console.error('Check your ANTHROPIC_API_KEY in .env');
-    }
-  }
+  const result = await runAgent(scenario);
+  console.log('\n' + '='.repeat(60));
+  console.log('FINAL RESPONSE:');
+  console.log('='.repeat(60));
+  console.log(result);
 }
 
-main();
+main().catch(console.error);
