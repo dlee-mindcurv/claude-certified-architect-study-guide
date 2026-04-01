@@ -1,374 +1,148 @@
 /**
- * Task 2.4 — MCP Client Integration Reference
+ * Task 2.4 — MCP Integration with createSdkMcpServer
  *
  * Exam relevance:
  * - MCP is the standard protocol for tool integration
- * - SDK code configures MCP client connections programmatically
- * - Tools are discovered dynamically from MCP servers at startup
- * - MCP resources provide content catalogs for agent context
+ * - createSdkMcpServer() bundles tool() definitions into an MCP server
+ * - mcpServers option in query() connects servers to the agent
+ * - Tools are auto-named: mcp__{serverName}__{toolName}
  *
- * This is a REFERENCE implementation showing the conceptual pattern for
- * MCP client integration in SDK agent code. It uses mock implementations
- * since a real MCP server is not included in this project, but the
- * pattern and API surface match the real MCP client SDK.
+ * EXAM KEY CONCEPT:
+ *   The Agent SDK pattern for MCP:
+ *   1. Define tools with tool() (name, description, schema, handler)
+ *   2. Bundle into a server with createSdkMcpServer({ name, version, tools })
+ *   3. Pass to query() via options.mcpServers
+ *   4. Agent calls tools as mcp__{serverName}__{toolName}
  *
- * The key concepts demonstrated:
- * 1. Connecting to MCP servers via stdio transport
- * 2. Discovering tools dynamically from servers
- * 3. Merging MCP tools with local tool definitions
- * 4. Routing tool calls to the correct handler
- * 5. Reading MCP resources for agent context
+ * This example demonstrates:
+ * 1. Creating a custom MCP server with tool()
+ * 2. Passing it to query() via mcpServers option
+ * 3. Agent discovering and using the tools automatically
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
+// ─── Step 1: Define tools with tool() ─────────────────────────────────────
 
-// ─── Mock MCP Client ───────────────────────────────────────────────────────
-// Simulates an MCP client that connects to servers and discovers tools.
-// In production, use the official MCP client SDK.
-
-class MockMcpClient {
-  constructor() {
-    this.servers = new Map();
-    this.allTools = [];
-  }
-
-  /**
-   * Connect to an MCP server via stdio transport.
-   *
-   * In production, this spawns the server as a subprocess and establishes
-   * communication over stdin/stdout using the MCP protocol.
-   */
-  async connect(transport, config) {
-    const serverName = config.args?.[0] || 'unknown-server';
-    console.log(`  [MCP] Connecting to server via ${transport}: ${serverName}`);
-
-    // Simulate server startup and handshake
-    const server = {
-      name: serverName,
-      transport,
-      config,
-      connected: true,
-      tools: [],
-      resources: [],
-    };
-
-    // Simulate tool discovery (tools/list)
-    server.tools = await this._discoverTools(serverName);
-    server.resources = await this._discoverResources(serverName);
-
-    this.servers.set(serverName, server);
-    this.allTools.push(...server.tools);
-
-    console.log(
-      `  [MCP] Connected. Discovered ${server.tools.length} tools, ` +
-        `${server.resources.length} resources`
-    );
-
-    return server;
-  }
-
-  /**
-   * Discover tools from a connected MCP server.
-   *
-   * Equivalent to: mcpClient.request('tools/list')
-   */
-  async _discoverTools(serverName) {
-    // Mock: return tools based on server name
-    if (serverName.includes('code-analysis')) {
-      return [
-        {
-          name: 'analyze_code_quality',
-          description:
-            'Analyze code quality for a file or directory. Returns metrics including ' +
-            'cyclomatic complexity, code duplication, test coverage, and lint issues. ' +
-            'Accepts a file path or directory path relative to project root.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: 'File or directory path' },
-              include_metrics: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Metrics to include: complexity, duplication, coverage, lint',
-              },
-            },
-            required: ['path'],
-          },
-        },
-        {
-          name: 'find_dependencies',
-          description:
-            'Find all import/require dependencies for a file. Returns a dependency ' +
-            'graph showing direct and transitive dependencies. Useful for understanding ' +
-            'impact of changes.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              file_path: { type: 'string', description: 'Source file path' },
-              depth: {
-                type: 'number',
-                description: 'Maximum depth for transitive dependencies (default: 3)',
-              },
-            },
-            required: ['file_path'],
-          },
-        },
-      ];
-    }
-
-    return [];
-  }
-
-  /**
-   * Discover resources from a connected MCP server.
-   *
-   * Equivalent to: mcpClient.request('resources/list')
-   */
-  async _discoverResources(serverName) {
-    if (serverName.includes('code-analysis')) {
-      return [
-        {
-          uri: 'project://file-tree',
-          name: 'Project File Tree',
-          description: 'Complete file tree of the project',
-          mimeType: 'application/json',
-        },
-        {
-          uri: 'project://dependency-graph',
-          name: 'Dependency Graph',
-          description: 'Full dependency graph for the project',
-          mimeType: 'application/json',
-        },
-      ];
-    }
-    return [];
-  }
-
-  /**
-   * Execute a tool call via MCP.
-   *
-   * Equivalent to: mcpClient.request('tools/call', { name, arguments })
-   */
-  async callTool(name, args) {
-    console.log(`  [MCP] Calling tool: ${name}(${JSON.stringify(args).substring(0, 60)})`);
-
-    // Mock implementation — in production, this sends the call to the MCP server
-    if (name === 'analyze_code_quality') {
-      return {
-        content: JSON.stringify({
-          path: args.path,
-          metrics: {
-            complexity: { average: 4.2, max: 12, files_above_threshold: 2 },
-            duplication: { percentage: 3.1, duplicate_blocks: 5 },
-            coverage: { line: 78.5, branch: 65.2 },
-            lint: { errors: 0, warnings: 8 },
-          },
-          summary: 'Code quality is generally good. Two files have high complexity.',
-        }),
-      };
-    }
-
-    if (name === 'find_dependencies') {
-      return {
-        content: JSON.stringify({
-          file: args.file_path,
-          directDependencies: ['./utils.js', './config.js', 'express'],
-          transitiveDependencies: {
-            './utils.js': ['lodash', './helpers.js'],
-            './config.js': ['dotenv'],
-          },
-          totalDependencies: 6,
-        }),
-      };
-    }
-
+const analyzeCodeQuality = tool(
+  'analyze_code_quality',
+  'Analyze code quality for a file or directory. Returns metrics: cyclomatic ' +
+  'complexity, code duplication, test coverage, and lint issues. ' +
+  'Accepts a file path relative to project root.',
+  {
+    path: z.string().describe('File or directory path relative to project root'),
+    include_metrics: z.array(z.string()).optional()
+      .describe('Metrics to include: complexity, duplication, coverage, lint'),
+  },
+  async ({ path, include_metrics }) => {
+    // Mock implementation
     return {
-      isError: true,
-      content: JSON.stringify({
-        errorCategory: 'validation',
-        isRetryable: false,
-        message: `Unknown MCP tool: ${name}`,
-      }),
+      content: [{ type: 'text', text: JSON.stringify({
+        path,
+        metrics: {
+          complexity: { average: 4.2, max: 12, filesAboveThreshold: 2 },
+          duplication: { percentage: 3.1, duplicateBlocks: 5 },
+          coverage: { line: 78.5, branch: 65.2 },
+          lint: { errors: 0, warnings: 8 },
+        },
+        summary: 'Code quality is generally good. Two files have high complexity.',
+      }) }],
     };
-  }
+  },
+);
 
-  /**
-   * Read a resource from an MCP server.
-   *
-   * Equivalent to: mcpClient.request('resources/read', { uri })
-   */
-  async readResource(uri) {
-    console.log(`  [MCP] Reading resource: ${uri}`);
+const findDependencies = tool(
+  'find_dependencies',
+  'Find all import/require dependencies for a file. Returns a dependency ' +
+  'graph showing direct and transitive dependencies. Useful for understanding ' +
+  'the impact of changes.',
+  {
+    file_path: z.string().describe('Source file path relative to project root'),
+    depth: z.number().optional().describe('Max depth for transitive deps (default: 3)'),
+  },
+  async ({ file_path, depth = 3 }) => {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        file: file_path,
+        directDependencies: ['./utils.js', './config.js', 'express'],
+        transitiveDependencies: {
+          './utils.js': ['lodash', './helpers.js'],
+          './config.js': [],
+        },
+        totalDependencies: 5,
+      }) }],
+    };
+  },
+);
 
-    if (uri === 'project://file-tree') {
-      return {
-        contents: [
-          {
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify({
-              root: 'my-project',
-              children: [
-                { name: 'src', type: 'directory', children: ['index.js', 'utils.js', 'config.js'] },
-                { name: 'tests', type: 'directory', children: ['index.test.js'] },
-                { name: 'package.json', type: 'file' },
-              ],
-            }),
-          },
-        ],
-      };
-    }
+// ─── Step 2: Bundle into an MCP server ────────────────────────────────────
+// EXAM KEY CONCEPT: createSdkMcpServer() wraps tool() definitions into
+// an MCP-compatible server. Tools become mcp__code-analysis__analyze_code_quality.
 
-    return { contents: [] };
-  }
+const codeAnalysisServer = createSdkMcpServer({
+  name: 'code-analysis',
+  version: '1.0.0',
+  tools: [analyzeCodeQuality, findDependencies],
+});
 
-  /**
-   * Get all discovered tools from all connected servers.
-   */
-  getDiscoveredTools() {
-    return this.allTools;
-  }
+// ─── Step 3: Run agent with mcpServers option ─────────────────────────────
 
-  /**
-   * Convert MCP tool format to Anthropic API tool format.
-   *
-   * MCP uses 'inputSchema'; the Anthropic API uses 'input_schema'.
-   */
-  toAnthropicToolFormat(mcpTools) {
-    return mcpTools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema,
-    }));
-  }
-}
+async function main() {
+  console.log('Task 2.4: MCP Integration with createSdkMcpServer\n');
 
-// ─── Agent with MCP Integration ────────────────────────────────────────────
+  console.log('Step 1: Defined tools with tool()');
+  console.log('  - analyze_code_quality');
+  console.log('  - find_dependencies\n');
 
-async function runAgentWithMcp() {
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  Task 2.4: MCP Client Integration Reference              ║');
-  console.log('╚════════════════════════════════════════════════════════════╝\n');
+  console.log('Step 2: Bundled into createSdkMcpServer({ name: "code-analysis" })');
+  console.log('  Tools become: mcp__code-analysis__analyze_code_quality');
+  console.log('                mcp__code-analysis__find_dependencies\n');
 
-  // ── Step 1: Initialize MCP Client and Connect to Servers ──────────────
-  console.log('Step 1: Connect to MCP servers\n');
+  console.log('Step 3: Passing to query() via options.mcpServers\n');
 
-  const mcpClient = new MockMcpClient();
-
-  // Connect to the code analysis MCP server
-  await mcpClient.connect('stdio', {
-    command: 'node',
-    args: ['./tools/code-analysis-server.js'],
-    env: { PROJECT_ROOT: '.' },
-  });
-
-  // ── Step 2: Discover Tools ────────────────────────────────────────────
-  console.log('\nStep 2: Discover tools from MCP servers\n');
-
-  const mcpTools = mcpClient.getDiscoveredTools();
-  console.log(`  Discovered ${mcpTools.length} MCP tools:`);
-  for (const tool of mcpTools) {
-    console.log(`    - ${tool.name}: ${tool.description.substring(0, 60)}...`);
-  }
-
-  // Convert to Anthropic API format
-  const anthropicTools = mcpClient.toAnthropicToolFormat(mcpTools);
-
-  // ── Step 3: Optionally Read Resources for Context ─────────────────────
-  console.log('\nStep 3: Read MCP resources for agent context\n');
-
-  const fileTree = await mcpClient.readResource('project://file-tree');
-  console.log(`  File tree: ${JSON.stringify(JSON.parse(fileTree.contents[0].text).root)}`);
-
-  // ── Step 4: Run Agent with MCP Tools ──────────────────────────────────
-  console.log('\nStep 4: Run agent with discovered MCP tools\n');
-
-  const systemPrompt =
-    'You are a code analysis assistant. Use the available tools to analyze ' +
-    'code quality and dependencies. Provide actionable recommendations.\n\n' +
-    `Project context:\n${fileTree.contents[0].text}`;
-
-  const messages = [
-    {
-      role: 'user',
-      content: 'Analyze the code quality of src/index.js and show its dependencies.',
+  // EXAM KEY CONCEPT: mcpServers option connects MCP servers to the agent.
+  // The agent discovers tools automatically from all connected servers.
+  for await (const message of query({
+    prompt:
+      'Analyze the code quality of src/index.js and show its dependencies.',
+    options: {
+      system:
+        'You are a code analysis assistant. Use the available tools to analyze ' +
+        'code quality and dependencies. Provide actionable recommendations.',
+      mcpServers: [codeAnalysisServer],   // Connect the MCP server
+      maxTurns: 6,
+      hooks: {
+        postToolUse: async ({ toolName, toolInput, toolResult }) => {
+          console.log(`  Tool call: ${toolName}`);
+          console.log(`    Input: ${JSON.stringify(toolInput)}`);
+        },
+      },
     },
-  ];
-
-  let turnCount = 0;
-  const MAX_TURNS = 10;
-
-  while (true) {
-    if (++turnCount > MAX_TURNS) break;
-
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      system: systemPrompt,
-      tools: anthropicTools,
-      messages,
-    });
-
-    if (response.stop_reason === 'end_turn') {
-      const text = response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n');
-      console.log(`  Agent response: ${text.substring(0, 200)}...`);
-      break;
-    }
-
-    if (response.stop_reason === 'tool_use') {
-      messages.push({ role: 'assistant', content: response.content });
-      const results = [];
-
-      for (const block of response.content.filter((b) => b.type === 'tool_use')) {
-        // Route tool call to MCP server
-        const result = await mcpClient.callTool(block.name, block.input);
-
-        results.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: typeof result.content === 'string' ? result.content : JSON.stringify(result.content),
-          ...(result.isError && { is_error: true }),
-        });
-      }
-
-      messages.push({ role: 'user', content: results });
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      console.log(`\n  Agent response: ${message.result.substring(0, 300)}...`);
     }
   }
 
   // ── Summary ───────────────────────────────────────────────────────────
   console.log('\n' + '='.repeat(60));
-  console.log('MCP Integration Pattern Summary');
+  console.log('MCP Integration Pattern (exam summary)');
   console.log('='.repeat(60));
   console.log(`
-  1. CONNECT: Initialize MCP client and connect to servers at startup
-     mcpClient.connect('stdio', { command: 'node', args: ['./server.js'] })
-
-  2. DISCOVER: Get available tools from all connected servers
-     mcpClient.request('tools/list') → tool definitions
-
-  3. CONVERT: Transform MCP tool format to Anthropic API format
-     MCP: inputSchema → Anthropic: input_schema
-
-  4. CONTEXT: Read MCP resources for additional agent context
-     mcpClient.request('resources/read', { uri: '...' })
-
-  5. ROUTE: During the agentic loop, route tool calls to MCP servers
-     mcpClient.request('tools/call', { name, arguments })
+  1. DEFINE:  tool('name', 'description', schema, handler)
+  2. BUNDLE:  createSdkMcpServer({ name, version, tools: [...] })
+  3. CONNECT: query({ options: { mcpServers: [server] } })
+  4. NAMING:  Tools auto-named mcp__{serverName}__{toolName}
+  5. MULTI:   Multiple servers can be passed to mcpServers array
 
   Key exam concepts:
-  - MCP clients connect to servers via stdio or SSE transport
-  - Tools are discovered dynamically, not hardcoded
-  - MCP resources provide passive content (docs, file trees)
-  - Tool format conversion may be needed (inputSchema → input_schema)
-  - Handle MCP server failures gracefully (reduced capabilities)
+  - createSdkMcpServer() is the SDK way to create MCP servers
+  - tool() uses Zod schemas for input validation
+  - mcpServers option replaces manual MCP client setup
+  - Multiple servers = multiple tool namespaces (no collisions)
+  - Agent discovers tools from all connected servers automatically
   `);
 }
 
-runAgentWithMcp().catch(console.error);
+main().catch(console.error);

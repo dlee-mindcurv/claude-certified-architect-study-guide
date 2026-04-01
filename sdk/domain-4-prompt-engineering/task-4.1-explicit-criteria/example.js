@@ -8,21 +8,16 @@
  * - The detected_pattern field enables false positive tracking per category
  * - Scenario 5 (CI/CD) depends heavily on this pattern
  *
- * This example sends the SAME code snippet through two different prompts:
+ * This example sends the SAME code snippet through two different prompts
+ * using Agent SDK query():
  * 1. A vague prompt ("be conservative")
  * 2. An explicit criteria prompt (from shared/prompts/review-criteria.js)
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.1-explicit-criteria/example.js
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { reviewCriteriaPrompt } from '../../../shared/prompts/review-criteria.js';
-
-// ─── Configuration ──────────────────────────────────────────────────────────
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
 
 // ─── Sample Code to Review ──────────────────────────────────────────────────
 
@@ -84,27 +79,27 @@ const explicitPrompt = `${reviewCriteriaPrompt}
 ${sampleCode}
 \`\`\``;
 
-// ─── Run Both Approaches ────────────────────────────────────────────────────
+// ─── Run Both Approaches via Agent SDK query() ─────────────────────────────
 
 async function runReview(label, prompt) {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`Review approach: ${label}`);
   console.log('='.repeat(60));
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  });
+  // EXAM KEY CONCEPT: query() with a system prompt containing explicit criteria
+  // produces consistent, structured output. Vague prompts produce variable results.
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
 
-  const text = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('\n');
-
-  console.log(text);
-  return text;
+  console.log(resultText);
+  return resultText;
 }
+
+// ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log('Task 4.1 -- Comparing Vague vs. Explicit Review Criteria\n');

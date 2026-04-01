@@ -8,16 +8,12 @@
  * - detected_pattern tracking for systematic error analysis
  * - Scenario 6 (Data Extraction) depends on this pattern
  *
- * This example demonstrates:
- * 1. Schema validation after extraction
- * 2. Error classification (retryable vs non-retryable)
- * 3. Retry with error feedback
- * 4. Self-correction validation (stated vs calculated totals)
+ * This is an API-level concept -- uses @anthropic-ai/sdk directly for the
+ * retry loop with multi-turn conversation history.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.4-validation-retry/example.js
  */
 
-import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../shared/schemas/extraction-output.js';
 
@@ -52,7 +48,7 @@ const validationRules = [
   {
     name: 'valid-date-format',
     check: (extraction) => {
-      if (extraction.date === null) return true; // null is valid
+      if (extraction.date === null) return true;
       return /^\d{4}(-\d{2}(-\d{2})?)?$/.test(extraction.date);
     },
     errorMessage: (extraction) =>
@@ -102,10 +98,6 @@ const validationRules = [
 
 // ─── Validation Engine ──────────────────────────────────────────────────────
 
-/**
- * Validate an extraction result against all rules.
- * Returns { isValid, errors[] } where each error has a retryable classification.
- */
 function validateExtraction(extraction) {
   const errors = [];
 
@@ -138,8 +130,7 @@ function validateExtraction(extraction) {
  * Extract with validation-retry loop.
  *
  * EXAM KEY CONCEPT: The retry sends the ORIGINAL document + the FAILED extraction
- * + the SPECIFIC validation error. This gives Claude full context to understand
- * what went wrong and correct it.
+ * + the SPECIFIC validation error. This gives Claude full context to self-correct.
  *
  * Non-retryable errors are accepted immediately (retrying would waste tokens
  * or cause hallucination).
@@ -148,7 +139,6 @@ async function extractWithRetry(documentText, documentId) {
   console.log(`\nExtracting: ${documentId}`);
   console.log('─'.repeat(50));
 
-  // Error tracking for systematic analysis
   const errorLog = [];
   let attempt = 0;
   let messages = [
@@ -225,16 +215,12 @@ ${documentText}`,
     }
 
     // ── Build retry message with error feedback ────────────────────
-    //
-    // EXAM KEY CONCEPT: The retry includes:
-    // 1. The original document (already in conversation history)
-    // 2. The failed extraction (Claude's previous tool_use)
-    // 3. Specific validation errors (what to fix)
+    // EXAM KEY CONCEPT: The retry includes the failed extraction (in
+    // conversation history) and specific validation errors (what to fix).
     const retryableErrorMessages = validation.retryableErrors
       .map(e => `- ${e.message}`)
       .join('\n');
 
-    // Append Claude's response and our feedback as conversation turns
     messages.push({ role: 'assistant', content: response.content });
     messages.push({
       role: 'user',
@@ -251,18 +237,11 @@ Re-extract the document with these corrections. The original document is in the 
 
 // ─── Self-Correction Demonstration ──────────────────────────────────────────
 
-/**
- * Demonstrate self-correction with stated vs. calculated totals.
- *
- * EXAM KEY CONCEPT: Claude independently calculates totals from line items
- * and compares to stated totals. Conflicts are flagged -- not auto-corrected.
- */
 async function demonstrateSelfCorrection() {
   console.log('\n' + '='.repeat(60));
   console.log('SELF-CORRECTION: Stated vs. Calculated Totals');
   console.log('='.repeat(60));
 
-  // Document with a deliberate total error
   const docWithError = `INVOICE #INV-ERROR-001
 Date: 2025-04-01
 

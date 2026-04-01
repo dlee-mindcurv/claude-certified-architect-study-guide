@@ -6,36 +6,20 @@
  * - Task 5.2: Escalation criteria in the CSR agent
  * - Examples demonstrate REASONING for each decision, enabling generalization
  *
- * These examples are designed for the CSR system prompt's escalation section.
- * They cover the four critical ambiguous cases:
- *   1. Standard issue that looks complex but is within policy (resolve)
- *   2. Policy gap requiring human judgment (escalate)
- *   3. Frustrated customer with resolvable issue (resolve, but escalate if they insist)
- *   4. Ambiguous request where policy is silent (escalate)
+ * Uses Agent SDK query() with the CSR system prompt and few-shot escalation
+ * examples injected into the prompt. Tests novel ambiguous cases against
+ * the reasoning framework.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.2-few-shot/scenario-1-csr/escalation-examples.js
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { csrSystemPrompt } from '../../../../shared/prompts/csr-system-prompt.js';
-
-// ─── Configuration ──────────────────────────────────────────────────────────
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
 
 // ─── Escalation Few-Shot Examples ───────────────────────────────────────────
 //
 // EXAM KEY CONCEPT: These examples cover the BOUNDARY cases -- situations
-// where the correct action is ambiguous. Clear-cut cases (order status check,
-// explicit human request) do not need examples because Claude handles them
-// correctly without guidance.
-//
-// Each example includes:
-// - Customer message (input)
-// - Correct action (decision)
-// - Reasoning (WHY this decision is correct)
+// where the correct action is ambiguous. Clear-cut cases do not need examples.
 
 export const escalationExamples = [
   {
@@ -60,8 +44,7 @@ export const escalationExamples = [
       'Our price-matching policy only covers our own website price history (e.g., if we ' +
       'drop the price within 30 days of purchase). Competitor price matching is not covered ' +
       'by any existing policy. This is a policy gap -- not a clear denial. Escalating allows ' +
-      'a human agent to make a judgment call about customer retention vs. margin, especially ' +
-      'given the customer mentions loyalty.',
+      'a human agent to make a judgment call about customer retention vs. margin.',
     tools_to_use: ['get_customer', 'escalate_to_human'],
     category: 'policy-gap',
   },
@@ -73,11 +56,8 @@ export const escalationExamples = [
     action: 'RESOLVE',
     reasoning:
       'The customer is frustrated, but the underlying issue -- shipping delay -- is within ' +
-      'our capability to investigate and resolve. The correct approach is: (1) acknowledge ' +
-      'the frustration empathetically, (2) look up the order and tracking information, ' +
-      '(3) provide a concrete update and offer a resolution (expedited re-ship or partial ' +
-      'refund). Only escalate if, AFTER receiving information and a resolution offer, the ' +
-      'customer explicitly requests a human agent.',
+      'our capability to investigate and resolve. Acknowledge frustration, look up the order, ' +
+      'provide a concrete update and resolution offer. Only escalate if they reiterate preference for a human.',
     tools_to_use: ['get_customer', 'lookup_order'],
     category: 'frustrated-but-resolvable',
   },
@@ -91,24 +71,14 @@ export const escalationExamples = [
     reasoning:
       'This request involves multiple policy intersections: gift exchanges, clearance-to-' +
       'regular-price conversions, and partial payment processing. Our policy is silent on ' +
-      'whether a clearance-to-full-price exchange is permitted and how the price difference ' +
-      'should be handled. Making an incorrect assumption could either cost the company money ' +
-      '(eating the difference) or frustrate the customer (refusing a reasonable request). ' +
-      'Escalate so a human can apply judgment.',
+      'whether a clearance-to-full-price exchange is permitted. Escalate so a human can apply judgment.',
     tools_to_use: ['get_customer', 'escalate_to_human'],
     category: 'policy-silent',
   },
 ];
 
-// ─── Format Examples for Prompt Injection ───────────────────────────────────
+// ─── Format Examples for Prompt ─────────────────────────────────────────────
 
-/**
- * Format escalation examples as a prompt section.
- *
- * EXAM KEY CONCEPT: The format includes reasoning as a first-class field,
- * not just input -> output. This teaches Claude to reason about novel
- * situations using the same decision framework.
- */
 export function formatEscalationExamples(examples = escalationExamples) {
   let prompt = '## Escalation Decision Examples\n\n';
 
@@ -123,7 +93,7 @@ export function formatEscalationExamples(examples = escalationExamples) {
   return prompt;
 }
 
-// ─── Demo: Test with Novel Ambiguous Cases ──────────────────────────────────
+// ─── Novel Test Cases ───────────────────────────────────────────────────────
 
 const novelTestCases = [
   {
@@ -150,12 +120,12 @@ const novelTestCases = [
   },
 ];
 
+// ─── Demo: Test with Agent SDK query() ──────────────────────────────────────
+
 async function testEscalationDecisions() {
   console.log('Task 4.2 / Scenario 1 -- Escalation Few-Shot Examples\n');
   console.log('Testing novel cases against the few-shot-enhanced prompt.\n');
 
-  // Build the prompt with few-shot examples
-  const systemPrompt = csrSystemPrompt;
   const examplesSection = formatEscalationExamples();
 
   for (const testCase of novelTestCases) {
@@ -164,20 +134,18 @@ async function testEscalationDecisions() {
     console.log(`Customer: "${testCase.message}"`);
     console.log(`Expected: ${testCase.expectedAction} (${testCase.explanation})`);
 
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages: [
-        {
-          role: 'user',
-          content: `${examplesSection}\n\n## Current Customer Message\n\n"${testCase.message}"\n\nProvide your decision (RESOLVE or ESCALATE) and your reasoning. Reference which example's reasoning framework applies to this situation.`,
-        },
-      ],
-    });
+    // EXAM KEY CONCEPT: The CSR system prompt context + few-shot examples
+    // are combined in a single query() prompt. Each test runs in isolation.
+    const prompt = `${csrSystemPrompt}\n\n${examplesSection}\n\n## Current Customer Message\n\n"${testCase.message}"\n\nProvide your decision (RESOLVE or ESCALATE) and your reasoning. Reference which example's reasoning framework applies to this situation.`;
 
-    const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-    console.log(`\nAgent decision:\n${text}`);
+    let resultText = '';
+    for await (const message of query({ prompt })) {
+      if (message.type === 'result' && message.subtype === 'success') {
+        resultText = message.result;
+      }
+    }
+
+    console.log(`\nAgent decision:\n${resultText}`);
   }
 }
 

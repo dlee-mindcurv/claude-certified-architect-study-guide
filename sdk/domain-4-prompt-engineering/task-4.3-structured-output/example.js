@@ -8,16 +8,12 @@
  * - Nullable fields (type: ["string", "null"]) enable correct absent-info handling
  * - Scenario 6 (Data Extraction) depends on these patterns
  *
- * This example demonstrates:
- * 1. A tool definition with required/optional/nullable fields
- * 2. Forced tool selection for guaranteed structured output
- * 3. Extracting structured data from tool_use response
- * 4. How nullable fields correctly return null for absent information
+ * This is an API-level concept -- uses @anthropic-ai/sdk directly with
+ * client.messages.create() and the tools parameter.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.3-structured-output/example.js
  */
 
-import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../shared/schemas/extraction-output.js';
 
@@ -70,8 +66,6 @@ over an 18-month period starting in September 2023.`,
 //
 // EXAM KEY CONCEPT: tool_choice: { type: "tool", name: "extract_document_info" }
 // forces Claude to call the specified tool, guaranteeing structured output.
-// The response will ALWAYS contain a tool_use block with input conforming
-// to the tool's input_schema.
 
 async function extractWithForcedTool(docKey) {
   const doc = documents[docKey];
@@ -83,7 +77,6 @@ async function extractWithForcedTool(docKey) {
     model: MODEL,
     max_tokens: 2048,
     // ── EXAM KEY CONCEPT: Forced tool selection ────────────────────────
-    // This guarantees structured output in the exact schema we defined.
     // Claude MUST call this specific tool -- it cannot respond with text.
     tools: [documentExtractionTool],
     tool_choice: { type: 'tool', name: 'extract_document_info' },
@@ -95,12 +88,10 @@ async function extractWithForcedTool(docKey) {
     ],
   });
 
-  // ── Extract the tool_use result ─────────────────────────────────────
   // With forced tool selection, the response ALWAYS contains a tool_use block
   const toolUseBlock = response.content.find(b => b.type === 'tool_use');
 
   if (!toolUseBlock) {
-    // This should never happen with forced tool selection
     console.error('ERROR: No tool_use block found (unexpected with forced selection)');
     return null;
   }
@@ -129,7 +120,7 @@ async function demonstrateToolChoiceOptions() {
     model: MODEL,
     max_tokens: 2048,
     tools: [documentExtractionTool],
-    tool_choice: 'auto',  // Default behavior
+    tool_choice: 'auto',
     messages: [
       { role: 'user', content: `What kind of document is this?\n\n${testDoc}` },
     ],
@@ -192,7 +183,6 @@ async function demonstrateNullableFields() {
   console.log('NULLABLE FIELDS: Handling Missing Information');
   console.log('='.repeat(60));
 
-  // Process the sparse receipt -- many fields will be null
   const sparseExtraction = await extractWithForcedTool('sparse');
 
   if (sparseExtraction) {

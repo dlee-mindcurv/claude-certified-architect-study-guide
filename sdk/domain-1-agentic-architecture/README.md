@@ -47,7 +47,7 @@ systems with Claude.
 
 Each task directory contains:
 - `README.md` -- Concept explanation and exam relevance
-- `example-raw-api.js` -- Implementation using `@anthropic-ai/sdk` directly
-- `example-agent-sdk.js` -- Reference implementation using Agent SDK patterns
+- `example-raw-api.js` -- Implementation using `@anthropic-ai/sdk` directly (manual loop)
+- `example-agent-sdk.js` -- Implementation using `@anthropic-ai/claude-agent-sdk` (query, tool, hooks)
 - `exercise.md` -- Hands-on exercise to test understanding
 - `scenario-*/` -- Scenario-specific implementations

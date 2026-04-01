@@ -1,360 +1,176 @@
 /**
- * Task 5.4 — Codebase Context Management with Subagent Delegation and Scratchpad
+ * Task 5.4 -- Codebase Context Management with Scratchpad Pattern (Agent SDK)
  *
  * Exam relevance:
  * - Context degradation in extended sessions
- * - Subagent delegation for focused investigation
  * - Scratchpad file pattern for persistent key findings
- * - Structured state exports for crash recovery
+ * - Subagent delegation for focused investigation
  * - /compact usage for context reduction
  *
- * This example demonstrates:
- * 1. Spawning subagents for specific investigation questions
- * 2. Main agent maintains high-level coordination
- * 3. Scratchpad file: write key findings, reference in subsequent queries
- * 4. Structured state exports for crash recovery
+ * EXAM KEY CONCEPT:
+ *   The scratchpad is a persistent FILE that survives beyond the context window.
+ *   Key findings are written to it after each investigation phase. When /compact
+ *   is used or context fills up, the scratchpad provides a reliable source of
+ *   truth for previous discoveries. This is implemented via a custom tool that
+ *   writes to disk.
+ *
+ * Uses query() with a custom scratchpad tool via tool() + createSdkMcpServer().
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
-const MAX_TURNS = 10;
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// ─── Simulated Codebase ──────────────────────────────────────────────────────
-//
-// Instead of reading a real codebase, we simulate file contents that a
-// subagent would encounter. In production, subagents would use file-reading
-// tools (Read, Bash, Glob, Grep) to explore the actual codebase.
-
-const simulatedCodebase = {
-  'src/auth/validate.js': {
-    content: `export function validateToken(token) {
-  const decoded = jwt.verify(token, SECRET);
-  // BUG: No check for token expiration
-  return { userId: decoded.sub, roles: decoded.roles };
-}`,
-    exports: ['validateToken'],
-    imports: ['jwt'],
-  },
-  'src/auth/refresh.js': {
-    content: `export function refreshToken(oldToken) {
-  const decoded = validateToken(oldToken);
-  return jwt.sign({ sub: decoded.userId, roles: decoded.roles }, SECRET, { expiresIn: '1h' });
-}`,
-    exports: ['refreshToken'],
-    imports: ['validateToken', 'jwt'],
-  },
-  'src/middleware/auth.js': {
-    content: `export function authMiddleware(req, res, next) {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    const user = validateToken(token);
-    req.user = user;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: 'Unauthorized' });
-  }
-}`,
-    exports: ['authMiddleware'],
-    imports: ['validateToken'],
-  },
-  'src/routes/api.js': {
-    content: `router.get('/profile', authMiddleware, getProfile);
-router.post('/settings', authMiddleware, updateSettings);
-router.get('/admin/users', authMiddleware, adminOnly, listUsers);`,
-    exports: ['router'],
-    imports: ['authMiddleware'],
-  },
-  'test/auth/validate.test.js': {
-    content: `describe('validateToken', () => {
-  it('should decode a valid token', () => { /* ... */ });
-  it('should throw on invalid signature', () => { /* ... */ });
-  // MISSING: No test for expired tokens
-});`,
-    exports: [],
-    imports: ['validateToken'],
-  },
-};
-
-// ─── Subagent Simulation ─────────────────────────────────────────────────────
-//
-// EXAM KEY CONCEPT: Each subagent gets a FOCUSED context (only the files
-// relevant to its question) and returns a STRUCTURED SUMMARY (not raw file
-// contents). This keeps the main agent's context clean and focused.
-
-async function executeInvestigationSubagent(question, relevantFiles) {
-  console.log(`\n  [Subagent] Investigating: "${question}"`);
-  console.log(`  [Subagent] Reading ${relevantFiles.length} files`);
-
-  // In production, this would be a real Claude API call with the files
-  // as context. Here we simulate the structured response.
-
-  switch (true) {
-    case question.includes('architecture'): {
-      return {
-        question,
-        summary: 'Auth module follows a layered architecture: validate.js (core token validation) -> refresh.js (token renewal) -> middleware/auth.js (Express middleware) -> routes/api.js (protected endpoints).',
-        keyFiles: relevantFiles,
-        findings: [
-          { file: 'src/auth/validate.js', finding: 'Core validation function. Uses jwt.verify() but does NOT check token expiration.' },
-          { file: 'src/auth/refresh.js', finding: 'Token refresh depends on validateToken. If validate passes expired tokens, refresh will also accept them.' },
-          { file: 'src/middleware/auth.js', finding: 'Express middleware wraps validateToken. Catches errors but error messages are generic (just "Unauthorized").' },
-        ],
-        concerns: ['No expiration check in validateToken', 'Generic error messages hide root cause'],
-      };
-    }
-
-    case question.includes('callers') || question.includes('validateToken'): {
-      return {
-        question,
-        summary: 'validateToken is called from 3 locations: refresh.js (token renewal), auth.js middleware (request authentication), and validate.test.js (tests).',
-        callers: [
-          { file: 'src/auth/refresh.js', function: 'refreshToken', lineContext: 'Decodes old token to create new one' },
-          { file: 'src/middleware/auth.js', function: 'authMiddleware', lineContext: 'Validates token on every protected request' },
-          { file: 'test/auth/validate.test.js', function: 'describe block', lineContext: 'Unit tests for validateToken' },
-        ],
-        callerCount: 3,
-      };
-    }
-
-    case question.includes('test') || question.includes('coverage'): {
-      return {
-        question,
-        summary: 'Test coverage is partial. validate.test.js has tests for valid tokens and invalid signatures, but NO test for expired tokens. No tests exist for refresh.js or auth.js middleware.',
-        testFiles: ['test/auth/validate.test.js'],
-        coveredScenarios: ['Valid token decoding', 'Invalid signature rejection'],
-        missingScenarios: ['Expired token handling', 'refresh.js behavior', 'Middleware error responses'],
-        coverageEstimate: '40% (2 of 5 critical scenarios)',
-      };
-    }
-
-    default: {
-      return {
-        question,
-        summary: 'Could not determine a specific investigation path for this question.',
-        findings: [],
-      };
-    }
-  }
-}
-
-// ─── Scratchpad File Management ──────────────────────────────────────────────
-//
-// EXAM KEY CONCEPT: The scratchpad is a persistent file that survives beyond
-// the context window. Key findings are written to it after each investigation
-// phase and read back before subsequent phases.
-
 const SCRATCHPAD_DIR = join(__dirname, '.claude');
 const SCRATCHPAD_PATH = join(SCRATCHPAD_DIR, 'scratchpad.md');
 
-function ensureScratchpadDir() {
-  if (!existsSync(SCRATCHPAD_DIR)) {
-    mkdirSync(SCRATCHPAD_DIR, { recursive: true });
-  }
-}
-
-function writeScratchpad(content) {
-  ensureScratchpadDir();
-  writeFileSync(SCRATCHPAD_PATH, content, 'utf-8');
-  console.log(`  [Scratchpad] Written to ${SCRATCHPAD_PATH}`);
-}
-
-function readScratchpad() {
-  if (!existsSync(SCRATCHPAD_PATH)) {
-    return null;
-  }
-  const content = readFileSync(SCRATCHPAD_PATH, 'utf-8');
-  console.log(`  [Scratchpad] Read from ${SCRATCHPAD_PATH} (${content.length} chars)`);
-  return content;
-}
-
-function renderScratchpadContent(findings) {
-  const lines = [
-    '# Investigation Scratchpad',
-    `Updated: ${new Date().toISOString()}`,
-    '',
-  ];
-
-  if (findings.task) {
-    lines.push(`## Task: ${findings.task}`, '');
-  }
-
-  if (findings.phase) {
-    lines.push(`## Current Phase: ${findings.phase}`, '');
-  }
-
-  if (findings.architecture) {
-    lines.push('## Architecture', findings.architecture.summary, '');
-    if (findings.architecture.concerns?.length > 0) {
-      lines.push('### Concerns');
-      findings.architecture.concerns.forEach(c => lines.push(`- ${c}`));
-      lines.push('');
-    }
-  }
-
-  if (findings.callers) {
-    lines.push('## Function Callers');
-    lines.push(findings.callers.summary, '');
-    if (findings.callers.callers) {
-      findings.callers.callers.forEach(c =>
-        lines.push(`- ${c.file}: ${c.function} (${c.lineContext})`)
-      );
-      lines.push('');
-    }
-  }
-
-  if (findings.tests) {
-    lines.push('## Test Coverage');
-    lines.push(findings.tests.summary, '');
-    if (findings.tests.missingScenarios) {
-      lines.push('### Missing Test Scenarios');
-      findings.tests.missingScenarios.forEach(s => lines.push(`- ${s}`));
-      lines.push('');
-    }
-  }
-
-  if (findings.actionsCompleted?.length > 0) {
-    lines.push('## Actions Completed');
-    findings.actionsCompleted.forEach(a => lines.push(`- ${a}`));
-    lines.push('');
-  }
-
-  if (findings.nextSteps?.length > 0) {
-    lines.push('## Next Steps');
-    findings.nextSteps.forEach(s => lines.push(`- [ ] ${s}`));
-    lines.push('');
-  }
-
-  return lines.join('\n');
-}
-
-// ─── Structured State Export for Crash Recovery ──────────────────────────────
+// ─── Scratchpad Tools ────────────────────────────────────────────────────────
 //
-// EXAM KEY CONCEPT: Write structured state to a file so that if the session
-// is interrupted, a new session can resume without repeating the investigation.
+// EXAM KEY CONCEPT: The scratchpad tool writes findings to a FILE on disk.
+// This file survives context compaction because it exists outside the
+// conversation history. The agent can read it back after /compact.
 
-const STATE_PATH = join(SCRATCHPAD_DIR, 'state.json');
+const writeScratchpadTool = tool({
+  name: 'write_scratchpad',
+  description: 'Write findings to the persistent scratchpad file. Use this to record key discoveries that must survive context compaction. The scratchpad persists on disk.',
+  schema: z.object({
+    section: z.string().describe('Section header (e.g., "Architecture", "Callers", "Test Coverage")'),
+    content: z.string().describe('Structured findings to record under this section'),
+  }),
+  run: async ({ section, content }) => {
+    if (!existsSync(SCRATCHPAD_DIR)) mkdirSync(SCRATCHPAD_DIR, { recursive: true });
 
-function exportState(state) {
-  ensureScratchpadDir();
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
-  console.log(`  [State] Exported to ${STATE_PATH}`);
-}
+    const entry = `\n## ${section}\nUpdated: ${new Date().toISOString()}\n\n${content}\n\n---\n`;
+    const existing = existsSync(SCRATCHPAD_PATH) ? readFileSync(SCRATCHPAD_PATH, 'utf-8') : '# Investigation Scratchpad\n';
+    writeFileSync(SCRATCHPAD_PATH, existing + entry, 'utf-8');
 
-function importState() {
-  if (!existsSync(STATE_PATH)) return null;
-  const raw = readFileSync(STATE_PATH, 'utf-8');
-  console.log(`  [State] Imported from ${STATE_PATH}`);
-  return JSON.parse(raw);
+    return `Written to scratchpad: ${section} (${content.length} chars)`;
+  },
+});
+
+const readScratchpadTool = tool({
+  name: 'read_scratchpad',
+  description: 'Read the persistent scratchpad file to recover findings from previous investigation phases. Use this after context compaction or session restart.',
+  schema: z.object({}),
+  run: async () => {
+    if (!existsSync(SCRATCHPAD_PATH)) {
+      return 'Scratchpad is empty. No previous findings recorded.';
+    }
+    return readFileSync(SCRATCHPAD_PATH, 'utf-8');
+  },
+});
+
+// Bundle tools into an MCP server
+const scratchpadServer = createSdkMcpServer({
+  name: 'scratchpad',
+  tools: [writeScratchpadTool, readScratchpadTool],
+});
+
+// ─── Investigation Subagent ─────────────────────────────────────────────────
+//
+// EXAM KEY CONCEPT: Each subagent gets a FOCUSED context (only relevant files)
+// and returns a STRUCTURED SUMMARY. The main agent's context stays clean.
+
+async function investigateWithSubagent(question, context) {
+  console.log(`\n  [Subagent] Investigating: "${question}"`);
+
+  let result = '';
+
+  for await (const message of query({
+    prompt: `${question}\n\nContext:\n${context}`,
+    options: {
+      systemPrompt: 'You are a code investigation subagent. Analyze the provided context and return structured findings. Be specific about file names, function names, and issues.',
+      maxTurns: 1,
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      result = message.result;
+    }
+  }
+
+  return result;
 }
 
 // ─── Main: Coordinated Investigation with Scratchpad ─────────────────────────
 
 async function main() {
   console.log('='.repeat(60));
-  console.log('Task 5.4: Codebase Context Management');
+  console.log('Task 5.4: Codebase Context Management with Scratchpad');
   console.log('='.repeat(60));
 
-  // Track all findings for the scratchpad
-  const allFindings = {
-    task: 'Fix authentication timeout bug',
-    phase: 'investigation',
-    actionsCompleted: [],
-    nextSteps: [],
-  };
+  // Simulated codebase context for investigation
+  const authCode = `
+// src/auth/validate.js
+export function validateToken(token) {
+  const decoded = jwt.verify(token, SECRET);
+  // BUG: No check for token expiration
+  return { userId: decoded.sub, roles: decoded.roles };
+}
 
-  // Check for existing state (crash recovery)
-  const existingState = importState();
-  if (existingState) {
-    console.log('\n  [Resume] Found existing state. Resuming from:', existingState.phase);
-    // In a real system, skip completed phases
+// src/auth/refresh.js - depends on validateToken
+// src/middleware/auth.js - wraps validateToken for Express
+// test/auth/validate.test.js - tests valid token + invalid signature, MISSING expired token test
+  `.trim();
+
+  // Phase 1: Use the main agent with scratchpad tool to investigate and record
+  console.log('\n--- Phase 1: Investigation with scratchpad recording ---');
+
+  for await (const message of query({
+    prompt: `Investigate this authentication code for bugs and test gaps.
+After each finding, write it to the scratchpad for persistence.
+
+Code to investigate:
+${authCode}
+
+Steps:
+1. Analyze the architecture and identify the bug
+2. Write your architecture findings to the scratchpad
+3. Identify what tests are missing
+4. Write test coverage findings to the scratchpad
+5. Summarize next steps`,
+    options: {
+      systemPrompt: `You are a code investigation coordinator. Use the scratchpad tools to persist your key findings.
+The scratchpad survives context compaction -- always write important discoveries there.
+Be specific: name files, functions, and line-level issues.`,
+      mcpServers: { scratchpad: scratchpadServer },
+      allowedTools: [
+        'mcp__scratchpad__write_scratchpad',
+        'mcp__scratchpad__read_scratchpad',
+      ],
+      maxTurns: 10,
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      console.log(`\nAgent summary: ${message.result}`);
+    }
   }
 
-  // ── Phase 1: Architecture Investigation ────────────────────────────────────
-  console.log('\n--- Phase 1: Architecture Investigation ---');
+  // Phase 2: Simulate context compaction -- start fresh, read scratchpad
+  console.log('\n--- Phase 2: After context compaction -- recovering from scratchpad ---');
 
-  const archResult = await executeInvestigationSubagent(
-    'What is the architecture of the auth module?',
-    ['src/auth/validate.js', 'src/auth/refresh.js', 'src/middleware/auth.js']
-  );
-
-  allFindings.architecture = archResult;
-  allFindings.actionsCompleted.push('Investigated auth module architecture');
-  console.log(`  Summary: ${archResult.summary}`);
-
-  // Write findings to scratchpad after phase 1
-  writeScratchpad(renderScratchpadContent(allFindings));
-  exportState({ ...allFindings, phase: 'caller_analysis' });
-
-  // ── Phase 2: Caller Analysis ───────────────────────────────────────────────
-  console.log('\n--- Phase 2: Caller Analysis ---');
-
-  // Read scratchpad to refresh context (simulates what happens after /compact)
-  const scratchpadContent = readScratchpad();
-  console.log(`  [Context] Scratchpad available: ${scratchpadContent ? 'yes' : 'no'}`);
-
-  const callerResult = await executeInvestigationSubagent(
-    'What functions call validateToken?',
-    ['src/auth/refresh.js', 'src/middleware/auth.js', 'test/auth/validate.test.js']
-  );
-
-  allFindings.callers = callerResult;
-  allFindings.actionsCompleted.push('Identified all callers of validateToken');
-  console.log(`  Summary: ${callerResult.summary}`);
-
-  // Update scratchpad with new findings
-  writeScratchpad(renderScratchpadContent(allFindings));
-  exportState({ ...allFindings, phase: 'test_coverage' });
-
-  // ── Phase 3: Test Coverage Analysis ────────────────────────────────────────
-  console.log('\n--- Phase 3: Test Coverage Analysis ---');
-
-  const testResult = await executeInvestigationSubagent(
-    'What is the test coverage for auth functions?',
-    ['test/auth/validate.test.js']
-  );
-
-  allFindings.tests = testResult;
-  allFindings.actionsCompleted.push('Analyzed test coverage');
-  allFindings.phase = 'implementation';
-  allFindings.nextSteps = [
-    'Add expiration check in validateToken()',
-    'Update error handling in authMiddleware',
-    'Add expired token test case',
-    'Add refresh.js test coverage',
-  ];
-  console.log(`  Summary: ${testResult.summary}`);
-
-  // Final scratchpad update before implementation phase
-  writeScratchpad(renderScratchpadContent(allFindings));
-  exportState({ ...allFindings, phase: 'implementation' });
-
-  // ── Summary ────────────────────────────────────────────────────────────────
-  console.log('\n' + '='.repeat(60));
-  console.log('Investigation Complete — Ready for Implementation');
-  console.log('='.repeat(60));
-
-  console.log('\nKey Findings (from scratchpad):');
-  console.log(`  Architecture: ${allFindings.architecture.summary}`);
-  console.log(`  Callers: ${allFindings.callers.summary}`);
-  console.log(`  Tests: ${allFindings.tests.summary}`);
-
-  console.log('\nNext Steps:');
-  allFindings.nextSteps.forEach(s => console.log(`  - ${s}`));
+  for await (const message of query({
+    prompt: 'Read the scratchpad to recover previous findings, then list the next implementation steps.',
+    options: {
+      systemPrompt: 'You are resuming an investigation after context compaction. Read the scratchpad to recover your previous findings.',
+      mcpServers: { scratchpad: scratchpadServer },
+      allowedTools: [
+        'mcp__scratchpad__read_scratchpad',
+      ],
+      maxTurns: 3,
+    },
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      console.log(`\nRecovered plan: ${message.result}`);
+    }
+  }
 
   console.log('\nContext management notes:');
-  console.log('  - 3 subagent delegations kept main context focused');
-  console.log('  - Scratchpad preserves findings across /compact or session restart');
-  console.log('  - State export enables crash recovery from any phase');
-  console.log(`  - Scratchpad: ${SCRATCHPAD_PATH}`);
-  console.log(`  - State: ${STATE_PATH}`);
+  console.log('  - Scratchpad persists findings across /compact or session restart');
+  console.log('  - Subagent delegation keeps main context focused');
+  console.log(`  - Scratchpad file: ${SCRATCHPAD_PATH}`);
 }
 
 main().catch(console.error);

@@ -8,20 +8,13 @@
  * - Batch API does NOT support multi-turn tool calling
  * - SLA calculation: pipeline_window + 24_hours = total guarantee
  * - Handle failures by resubmitting only failed documents
- * - Scenarios 5 (CI/CD) and 6 (Data Extraction)
  *
- * This example demonstrates:
- * 1. Creating batch requests with custom_id
- * 2. Submitting via Message Batches API
- * 3. Polling for completion
- * 4. Processing results and handling failures
- * 5. Resubmitting failed items
- * 6. SLA calculation
+ * This MUST use @anthropic-ai/sdk since the batch API is not in the Agent SDK.
+ * Uses client.messages.batches.create() for batch submission.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.5-batch-processing/example.js
  */
 
-import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../shared/schemas/extraction-output.js';
 import { getDocumentIds, getDocument } from '../../../shared/tools/extraction-tools.js';
@@ -46,7 +39,6 @@ function buildBatchRequests(documentIds) {
     const doc = getDocument(docId);
     if (!doc) continue;
 
-    // ── Build the request ─────────────────────────────────────────────
     // EXAM NOTE: custom_id must be unique within the batch
     const request = {
       custom_id: `extract-${docId}`,
@@ -54,7 +46,6 @@ function buildBatchRequests(documentIds) {
         model: MODEL,
         max_tokens: 2048,
         // ── Forced tool selection works in batch ────────────────────
-        // tool_choice and tools are supported in batch requests
         tools: [documentExtractionTool],
         tool_choice: { type: 'tool', name: 'extract_document_info' },
         messages: [
@@ -83,8 +74,6 @@ async function submitBatch(requests) {
   console.log(`\nSubmitting batch with ${requests.length} requests...`);
 
   // ── EXAM KEY CONCEPT: message_batches.create ──────────────────────
-  // The API accepts an array of requests and returns a batch object
-  // with an id for polling.
   const batch = await client.messages.batches.create({
     requests,
   });
@@ -118,7 +107,6 @@ async function pollBatchCompletion(batchId, intervalMs = 5000, maxWaitMs = 30000
       return batch;
     }
 
-    // Wait before polling again
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
 
@@ -137,13 +125,11 @@ async function processResults(batchId) {
     expired: [],
   };
 
-  // ── Iterate over batch results ──────────────────────────────────────
   // EXAM NOTE: Results are streamed via an async iterator
   for await (const result of client.messages.batches.results(batchId)) {
     const customId = result.custom_id;
 
     if (result.result.type === 'succeeded') {
-      // ── Extract the tool_use output ─────────────────────────────
       const message = result.result.message;
       const toolUse = message.content.find(b => b.type === 'tool_use');
 
@@ -236,7 +222,6 @@ function calculateSLA() {
   console.log('SLA CALCULATION');
   console.log('='.repeat(60));
 
-  // Example: Pipeline with 4-hour processing window + batch step
   const processingWindowHours = 4;
   const batchMaxHours = 24;
   const safetyMarginHours = 2;
@@ -254,9 +239,6 @@ function calculateSLA() {
   Results can take up to 24 hours. When calculating pipeline SLAs,
   add the 24-hour maximum to any other processing time.
 
-  In practice, most batches complete in 1-2 hours, but you cannot
-  guarantee this for SLA commitments.
-
   Example exam question:
   "A batch extraction pipeline has a 4-hour data processing window.
    What is the maximum end-to-end time guarantee?"
@@ -270,18 +252,13 @@ async function main() {
   console.log('Task 4.5 -- Message Batches API\n');
   console.log('Demonstrating batch submission, polling, and failure handling.\n');
 
-  // Build requests for all sample documents
   const documentIds = getDocumentIds();
   const requests = buildBatchRequests(documentIds);
 
-  // Submit the batch
   const batch = await submitBatch(requests);
-
-  // Poll for completion
   const completedBatch = await pollBatchCompletion(batch.id);
 
   if (completedBatch) {
-    // Process results
     const results = await processResults(batch.id);
 
     console.log(`\n--- Results Summary ---`);
@@ -289,13 +266,11 @@ async function main() {
     console.log(`  Failed: ${results.failed.length}`);
     console.log(`  Expired: ${results.expired.length}`);
 
-    // Resubmit failures if any
     const allFailed = [...results.failed, ...results.expired];
     if (allFailed.length > 0) {
       await resubmitFailures(allFailed, requests);
     }
 
-    // Show extractions
     for (const result of results.succeeded) {
       console.log(`\n  ${result.custom_id}:`);
       if (result.extraction) {
@@ -310,7 +285,6 @@ async function main() {
     }
   }
 
-  // SLA calculation demonstration
   calculateSLA();
 
   console.log('\n' + '='.repeat(60));

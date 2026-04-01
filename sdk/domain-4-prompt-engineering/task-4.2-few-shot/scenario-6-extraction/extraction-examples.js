@@ -7,29 +7,15 @@
  *   and missing fields
  * - Each example demonstrates reasoning about what IS and IS NOT in the source
  *
- * Key extraction failure modes addressed by these examples:
- * 1. Missing fields: Claude fabricates plausible values instead of returning null
- * 2. Narrative format: Information embedded in prose, not labeled fields
- * 3. Conflicting values: Stated total differs from calculated total
- * 4. Ambiguous entities: Same name appears in different roles
+ * Uses Agent SDK query() with few-shot examples in the prompt. Also shows the
+ * raw SDK approach with tool_use for comparison.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.2-few-shot/scenario-6-extraction/extraction-examples.js
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
-import { documentExtractionTool } from '../../../../shared/schemas/extraction-output.js';
-
-// ─── Configuration ──────────────────────────────────────────────────────────
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 // ─── Few-Shot Extraction Examples ───────────────────────────────────────────
-//
-// EXAM KEY CONCEPT: These examples teach Claude how to handle the specific
-// failure modes that cause incorrect extraction. Each example addresses a
-// different document structure and a different type of difficulty.
 
 export const extractionFewShotExamples = [
   {
@@ -57,15 +43,12 @@ TOTAL: $499.50`,
         { label: 'tax', stated_value: 37.00, calculated_value: 37.00, conflict_detected: false },
         { label: 'total', stated_value: 499.50, calculated_value: 499.50, conflict_detected: false },
       ],
-      key_dates: [{ label: 'invoice_date', date: '2025-03-15' }],
       field_confidence: { title: 0.99, date: 0.99, entities: 0.95, monetary_values: 0.98 },
       extraction_notes: null,
     },
     reasoning:
-      'All fields present in structured tabular format. Calculated total (250 + 212.50 = ' +
-      '462.50 subtotal, + 37.00 tax = 499.50) matches stated total. No vendor name is ' +
-      'present in this excerpt, so the vendor entity is not included. Author is null because ' +
-      'invoices do not have authors.',
+      'All fields present in structured tabular format. Calculated total matches stated total. ' +
+      'Author is null because invoices do not have authors.',
   },
   {
     id: 'sparse-receipt-missing-fields',
@@ -84,29 +67,23 @@ Paid: Cash`,
       monetary_values: [
         { label: 'total', stated_value: 23.47, calculated_value: null, conflict_detected: false },
       ],
-      key_dates: [],
       field_confidence: { title: 0.0, date: 0.0, entities: 0.90, monetary_values: 0.95 },
       extraction_notes:
         'No date present in document. No itemized line items, so calculated_value ' +
-        'cannot be independently verified. Title is null -- "Quick Mart" is the vendor name, ' +
-        'not a receipt title or number.',
+        'cannot be independently verified. Title is null -- "Quick Mart" is the vendor name.',
     },
     reasoning:
-      'CRITICAL: Date is NOT present in this document. The correct output is null, not a ' +
-      'fabricated or inferred date. The confidence for date is 0.0 because there is no date ' +
-      'information whatsoever. Similarly, there is no receipt number or title. "Quick Mart" ' +
-      'is the vendor name, not a title. calculated_value is null because there are no line ' +
-      'items to independently calculate from.',
+      'CRITICAL: Date is NOT present. The correct output is null, not a fabricated date. ' +
+      'calculated_value is null because there are no line items to verify from.',
   },
   {
     id: 'narrative-research-inline-citations',
-    description: 'Research paper in narrative format with inline citations (not structured fields)',
+    description: 'Research paper in narrative format with inline citations',
     input: `In their landmark 2024 study published in Nature Climate Science (Vol 12,
 pp 234-251), Dr. Kim and Dr. Patel examined rising ocean temperatures using data
 from 450 monitoring stations across the Pacific. They found that sea surface
-temperatures increased by 0.8 degrees Celsius over the study period (2015-2023),
-with the strongest warming observed in equatorial regions. The research was funded
-by the National Science Foundation (Grant #OCE-2401234).`,
+temperatures increased by 0.8 degrees Celsius over the study period (2015-2023).
+The research was funded by the National Science Foundation (Grant #OCE-2401234).`,
     output: {
       document_id: 'example-research',
       document_type: 'research_paper',
@@ -118,26 +95,14 @@ by the National Science Foundation (Grant #OCE-2401234).`,
         { name: 'Dr. Patel', role: 'author' },
       ],
       monetary_values: [],
-      key_dates: [
-        { label: 'publication_year', date: '2024' },
-        { label: 'study_period_start', date: '2015' },
-        { label: 'study_period_end', date: '2023' },
-      ],
       field_confidence: { title: 0.0, date: 0.70, entities: 0.90, monetary_values: 1.0 },
       extraction_notes:
         'This is an excerpt, not the full paper. The paper TITLE is not stated -- ' +
-        '"Nature Climate Science" is the journal name, not the paper title. Author field is ' +
-        'null at the top level because we cannot determine the full author list from "Dr. Kim ' +
-        'and Dr. Patel" (these may be abbreviated). Date confidence is 0.70 because only the ' +
-        'year is provided. Grant number noted but not extracted as monetary value since the ' +
-        'grant amount is not stated.',
+        '"Nature Climate Science" is the journal name, not the paper title.',
     },
     reasoning:
-      'Narrative format requires different extraction logic than tabular. The paper title is ' +
-      'NOT present in this excerpt. "Nature Climate Science" is the JOURNAL, not the paper. ' +
-      'This is the most common hallucination in research paper extraction -- fabricating a ' +
-      'title from the subject matter. The correct answer is null. Multiple dates are present ' +
-      '(publication year, study period) and should be extracted separately with labels.',
+      'Narrative format requires different extraction logic. The paper title is NOT present. ' +
+      '"Nature Climate Science" is the JOURNAL, not the paper. Returning null rather than guessing.',
   },
   {
     id: 'contract-conflicting-values',
@@ -168,21 +133,13 @@ Auto-renewal: Yes, 12-month terms unless 90-day written notice`,
           conflict_detected: true,
         },
       ],
-      key_dates: [
-        { label: 'effective_date', date: '2025-01-01' },
-        { label: 'end_date', date: '2026-12-31' },
-      ],
       field_confidence: { title: 0.95, date: 0.99, entities: 0.98, monetary_values: 0.95 },
       extraction_notes:
-        'CONFLICT DETECTED: Stated total contract value ($100,000) does not match ' +
-        'calculated value (24 months x $4,500 = $108,000). This may indicate a discount, ' +
-        'a typo, or terms not fully described in this excerpt. Flagging for human review.',
+        'CONFLICT DETECTED: Stated total ($100,000) does not match calculated (24 x $4,500 = $108,000).',
     },
     reasoning:
-      'The stated total ($100,000) and the calculated total (24 x $4,500 = $108,000) ' +
-      'differ by $8,000. Rather than choosing one over the other, the extraction reports ' +
-      'BOTH values and sets conflict_detected: true. The extraction_notes explain the ' +
-      'discrepancy and suggest possible explanations without guessing which is correct.',
+      'The stated total ($100,000) and calculated total (24 x $4,500 = $108,000) differ. ' +
+      'Report BOTH values and set conflict_detected: true. Do NOT silently correct.',
   },
 ];
 
@@ -203,7 +160,7 @@ export function formatExtractionExamples(examples = extractionFewShotExamples) {
   return prompt;
 }
 
-// ─── Demo: Test Extraction with and without Examples ────────────────────────
+// ─── Test Document ──────────────────────────────────────────────────────────
 
 const testDocument = `
 CONSULTING AGREEMENT
@@ -220,13 +177,15 @@ Total Estimated Value: $100,000
 Note: Final invoice will include applicable state taxes.
 `;
 
+// ─── Demo: Extract with Agent SDK query() ───────────────────────────────────
+
 async function runExtractionWithExamples() {
   console.log('Task 4.2 / Scenario 6 -- Extraction with Few-Shot Examples\n');
 
   const examplesPrompt = formatExtractionExamples();
 
-  const systemPrompt = `You are a document extraction agent. Extract structured information
-from documents using the provided tool. Follow the patterns shown in the examples exactly.
+  const systemContext = `You are a document extraction agent. Extract structured information
+from documents following the patterns shown in the examples exactly.
 When a field is not present in the source document, return null -- NEVER fabricate values.
 
 ${examplesPrompt}`;
@@ -234,48 +193,40 @@ ${examplesPrompt}`;
   console.log('Extracting from test document with few-shot examples...\n');
   console.log(`Document:\n${testDocument.trim()}\n`);
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2048,
-    system: systemPrompt,
-    tools: [documentExtractionTool],
-    tool_choice: { type: 'tool', name: 'extract_document_info' },
-    messages: [
-      {
-        role: 'user',
-        content: `Extract structured information from this document:\n\n${testDocument}`,
-      },
-    ],
-  });
+  // EXAM KEY CONCEPT: query() with few-shot examples in the prompt guides
+  // extraction behavior. The examples teach null handling, conflict detection,
+  // and format-specific logic.
+  const prompt = `${systemContext}\n\nExtract structured information from this document and return JSON:\n\n${testDocument}`;
 
-  // Extract the tool_use result
-  const toolUseBlock = response.content.find(b => b.type === 'tool_use');
-  if (toolUseBlock) {
-    console.log('Extraction result (via tool_use):');
-    console.log(JSON.stringify(toolUseBlock.input, null, 2));
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
 
-    // ── Validate key extraction behaviors ──────────────────────────────
-    console.log('\n--- Validation ---');
-    const input = toolUseBlock.input;
+  console.log('Extraction result:');
+  console.log(resultText);
 
-    // Check conflict detection
+  // ── Validate key extraction behaviors ──────────────────────────────
+  console.log('\n--- Validation ---');
+  try {
+    const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
+    const input = JSON.parse(jsonMatch[1].trim());
+
     const totalValue = input.monetary_values?.find(
       v => v.label?.toLowerCase().includes('total') || v.label?.toLowerCase().includes('estimated')
     );
     if (totalValue) {
-      const calculatedTotal = 6 * 15000 + 20000; // 6 months * $15k + $20k bonus = $110k
+      const calculatedTotal = 6 * 15000 + 20000;
       console.log(`Stated total: $${totalValue.stated_value}`);
       console.log(`Expected calculated: $${calculatedTotal} (6 x $15,000 + $20,000 bonus)`);
       console.log(`Conflict detected: ${totalValue.conflict_detected}`);
-      console.log(
-        totalValue.conflict_detected
-          ? 'PASS: Model correctly identified the discrepancy'
-          : 'NOTE: Model may have interpreted "estimated" as approximate, which is also reasonable'
-      );
     }
 
-    // Check for null fields (no author for a contract)
-    console.log(`\nAuthor field: ${input.author === null ? 'null (CORRECT)' : input.author + ' (check if appropriate)'}`);
+    console.log(`Author field: ${input.author === null ? 'null (CORRECT)' : input.author}`);
+  } catch {
+    console.log('Could not parse JSON for validation');
   }
 }
 

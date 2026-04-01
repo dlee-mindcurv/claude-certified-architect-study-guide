@@ -7,18 +7,12 @@
  * - Self-correction: stated_total vs calculated_total conflict detection
  * - Pattern tracking for systematic prompt improvement
  *
- * This module implements the complete extraction retry pipeline:
- * 1. Extract with forced tool_use (Task 4.3)
- * 2. Validate against schema and business rules
- * 3. Classify errors as retryable or non-retryable
- * 4. Retry with error feedback for retryable errors
- * 5. Accept partial results for non-retryable errors
- * 6. Track error patterns for systematic analysis
+ * Uses @anthropic-ai/sdk directly for the retry loop -- this is an API-level
+ * concept requiring multi-turn conversation management.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.4-validation-retry/scenario-6-extraction/retry-loop.js
  */
 
-import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../../shared/schemas/extraction-output.js';
 import { getDocumentIds, getDocument } from '../../../../shared/tools/extraction-tools.js';
@@ -32,7 +26,6 @@ const MAX_RETRIES = 2;
 // ─── Validation Rules ───────────────────────────────────────────────────────
 
 const VALIDATION_RULES = [
-  // ── Required fields ───────────────────────────────────────────────
   {
     name: 'required-document-id',
     check: (e) => !!e.document_id,
@@ -54,8 +47,6 @@ const VALIDATION_RULES = [
     errorType: 'retryable',
     pattern: 'missing-required-field',
   },
-
-  // ── Format validation ─────────────────────────────────────────────
   {
     name: 'valid-date-format',
     check: (e) => {
@@ -102,8 +93,6 @@ const VALIDATION_RULES = [
     errorType: 'retryable',
     pattern: 'enum-violation',
   },
-
-  // ── Self-correction validation ────────────────────────────────────
   {
     name: 'conflict-detection-consistency',
     check: (e) => {
@@ -121,8 +110,6 @@ const VALIDATION_RULES = [
     errorType: 'retryable',
     pattern: 'conflict-detection-error',
   },
-
-  // ── Key dates format validation ───────────────────────────────────
   {
     name: 'valid-key-dates-format',
     check: (e) => {
@@ -172,12 +159,6 @@ function validate(extraction) {
 
 // ─── Extraction with Retry ──────────────────────────────────────────────────
 
-/**
- * Extract document data with validation-retry loop.
- *
- * @param {string} documentId - Document identifier
- * @returns {object} { extraction, status, attempts, errorLog }
- */
 async function extractWithRetry(documentId) {
   const doc = getDocument(documentId);
   if (!doc) {
@@ -229,7 +210,6 @@ ${doc.raw}`,
     const extraction = toolUse.input;
     console.log(`  type: ${extraction.document_type}, date: ${extraction.date}`);
 
-    // ── Validate ─────────────────────────────────────────────────────
     const result = validate(extraction);
 
     if (result.isValid) {
@@ -237,13 +217,11 @@ ${doc.raw}`,
       return { extraction, status: 'success', attempts: attempt, errorLog };
     }
 
-    // Log errors
     for (const err of result.errors) {
       console.log(`  [${err.errorType}] ${err.message}`);
       errorLog.push({ attempt, ...err });
     }
 
-    // Only non-retryable errors remain -- accept partial
     if (result.retryable.length === 0) {
       console.log('  Accepting partial result (no retryable errors)');
       return {
@@ -255,7 +233,6 @@ ${doc.raw}`,
       };
     }
 
-    // Max retries reached
     if (attempt > MAX_RETRIES) {
       console.log('  Max retries exhausted');
       return { extraction, status: 'max_retries', attempts: attempt, errorLog };
@@ -282,14 +259,6 @@ Re-extract using the extract_document_info tool with corrections.`,
 
 // ─── Error Pattern Analyzer ─────────────────────────────────────────────────
 
-/**
- * Analyze error patterns across multiple extraction runs.
- *
- * EXAM KEY CONCEPT: Systematic pattern analysis reveals:
- * - High-frequency retryable errors -> prompt improvement opportunity
- * - Non-retryable errors -> source data limitations (accept and route to human)
- * - Patterns that are always resolved by retry -> validation is working well
- */
 function analyzePatterns(allErrorLogs) {
   const stats = {};
 
@@ -306,8 +275,6 @@ function analyzePatterns(allErrorLogs) {
       stats[err.pattern].total++;
       stats[err.pattern].documents.add(documentId);
 
-      // If this was the last attempt and the status is not success,
-      // the error was not resolved
       if (err.attempt === attempts && status !== 'success') {
         stats[err.pattern].unresolvable++;
       } else {
@@ -316,7 +283,6 @@ function analyzePatterns(allErrorLogs) {
     }
   }
 
-  // Convert Sets to counts for JSON serialization
   const result = {};
   for (const [pattern, data] of Object.entries(stats)) {
     result[pattern] = {

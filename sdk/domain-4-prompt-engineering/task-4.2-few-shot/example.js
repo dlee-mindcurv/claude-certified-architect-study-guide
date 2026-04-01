@@ -7,20 +7,14 @@
  * - 2-4 targeted examples for ambiguous cases outperform dozens of trivial ones
  * - Scenarios 1 (CSR) and 6 (Data Extraction) both depend on this pattern
  *
- * This example demonstrates two applications:
+ * This example demonstrates two applications using Agent SDK query():
  * 1. Escalation decisions with reasoning (CSR scenario)
  * 2. Extraction format with varied document structures (Extraction scenario)
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.2-few-shot/example.js
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
-
-// ─── Configuration ──────────────────────────────────────────────────────────
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 // ─── Part 1: Escalation Few-Shot Examples ───────────────────────────────────
 //
@@ -72,26 +66,24 @@ async function demonstrateEscalation() {
   console.log('PART 1: Escalation Decisions with Few-Shot Examples');
   console.log('='.repeat(60));
 
-  // Test with an ambiguous case not covered by examples
   const ambiguousMessage = `I ordered a laptop bag but I realized it's also available in
 your physical store near me for $10 less. Can I get the price adjusted? I don't want
 to return and rebuy since that seems wasteful.`;
 
   console.log(`\nCustomer: "${ambiguousMessage}"\n`);
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    messages: [
-      {
-        role: 'user',
-        content: `${escalationPrompt}${ambiguousMessage}\n\nProvide your decision (RESOLVE or ESCALATE) and reasoning.`,
-      },
-    ],
-  });
+  // EXAM KEY CONCEPT: query() with few-shot examples in the prompt teaches
+  // Claude a reasoning framework, not just input->output mappings.
+  const prompt = `${escalationPrompt}${ambiguousMessage}\n\nProvide your decision (RESOLVE or ESCALATE) and reasoning.`;
 
-  const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-  console.log('Agent decision:', text);
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
+
+  console.log('Agent decision:', resultText);
   console.log(`
 EXAM NOTE: Observe that Claude applies the reasoning FRAMEWORK from the
 examples to a novel situation. The examples taught it:
@@ -103,11 +95,6 @@ examples to a novel situation. The examples taught it:
 }
 
 // ─── Part 2: Extraction Few-Shot Examples ───────────────────────────────────
-//
-// EXAM KEY CONCEPT: Extraction few-shot examples demonstrate:
-// - How to handle MISSING fields (return null, not a guess)
-// - Different document structures (narrative vs. tabular)
-// - Ambiguous values (flag rather than guess)
 
 const extractionPrompt = `Extract structured information from the provided document.
 Return JSON conforming to the schema.
@@ -160,8 +147,7 @@ Output:
   "extraction_notes": "No date, no itemized line items, no receipt number. Title and date are null because they are not present in the source document."
 }
 Reasoning: Date and title are absent from the source. The correct output is null --
-NOT a fabricated date or inferred title. The extraction_notes field explains what is
-missing so downstream systems can request human review if needed.
+NOT a fabricated date or inferred title.
 
 ### Example 3: Research paper with narrative format (different structure)
 Input document:
@@ -186,8 +172,7 @@ Output:
 }
 Reasoning: This document is narrative format, not structured. The title is NOT
 present in this excerpt (the publication name "Nature Climate Science" is the
-journal, not the paper title). Returning null rather than guessing. The date is
-only a year with no month/day.
+journal, not the paper title). Returning null rather than guessing.
 
 ## Document to Extract
 `;
@@ -206,23 +191,20 @@ Auto-renews annually unless 60-day notice given.
 
   console.log(`\nDocument: "${testDocument.trim()}"\n`);
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    messages: [
-      {
-        role: 'user',
-        content: `${extractionPrompt}"""
+  const prompt = `${extractionPrompt}"""
 ${testDocument}
 """
 
-Return the extraction as JSON.`,
-      },
-    ],
-  });
+Return the extraction as JSON.`;
 
-  const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-  console.log('Extraction result:', text);
+  let resultText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      resultText = message.result;
+    }
+  }
+
+  console.log('Extraction result:', resultText);
   console.log(`
 EXAM NOTE: Observe how the few-shot examples influence this extraction:
 - The contract has a stated total ($38,400) and an implied total (12 x $3,200 = $38,400)

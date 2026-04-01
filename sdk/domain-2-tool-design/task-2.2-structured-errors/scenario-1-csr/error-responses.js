@@ -1,190 +1,93 @@
 /**
- * Scenario 1 (CSR Agent) — Structured Error Handling for All 4 CSR Tools
+ * Scenario 1 (CSR Agent) — Structured Error Patterns for All 4 CSR Tools
  *
  * Exam relevance: Task 2.2 (Structured errors for MCP tools)
  *
- * This module demonstrates the complete set of structured error responses
- * returned by the CSR tools. Each error includes:
- * - isError: true (MCP flag signaling tool failure)
- * - errorCategory: transient | validation | business | permission
- * - isRetryable: boolean (prevents wasted retry attempts)
- * - message: human-readable description for the agent
+ * EXAM KEY CONCEPT:
+ *   Every tool error should include:
+ *   - isError: true  (MCP flag signaling tool failure)
+ *   - errorCategory:  transient | validation | business | permission
+ *   - isRetryable:    boolean (prevents wasted retry attempts)
+ *   - message:        human-readable description for the agent
  *
- * The agent uses these fields to choose the correct recovery strategy:
- * - transient → retry automatically with backoff
- * - validation → fix input and retry (different input = new call)
- * - business → explain policy to user, do NOT retry
- * - permission → verify identity or escalate to human agent
+ *   The agent uses these fields to choose the correct recovery strategy.
+ *
+ * This module catalogs the structured error patterns returned by each
+ * CSR tool(), showing how the agent SDK tool() implementations use
+ * { isError: true } in their return values to signal failures.
  */
 
-import {
-  createErrorResponse,
-  createSuccessResponse,
-  ERROR_CATEGORIES,
-} from '../../../../shared/schemas/error-response.js';
+import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 
-// ─── get_customer Error Responses ──────────────────────────────────────────
+// ─── Helper: MCP tool result formatters ───────────────────────────────────
 
-export const customerErrors = {
+function ok(data) {
+  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+}
+
+function err(errorCategory, message, isRetryable = false) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ errorCategory, isRetryable, message }) }],
+    isError: true,   // EXAM KEY: this flag tells Claude the tool call failed
+  };
+}
+
+// ─── get_customer Error Catalog ───────────────────────────────────────────
+
+export const customerErrorPatterns = {
   // Transient: database temporarily unavailable (auto-retry)
-  databaseUnavailable: () =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.TRANSIENT,
-      isRetryable: true,
-      message: 'Customer database temporarily unavailable. Please retry.',
-    }),
+  databaseUnavailable: () => err('transient', 'Customer database temporarily unavailable. Please retry.', true),
 
   // Validation: no identifier provided
-  missingIdentifier: () =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.VALIDATION,
-      isRetryable: false,
-      message:
-        'Either email or customer_id is required. ' +
-        'Accepted formats: email address (user@example.com) or customer ID (C-XXXX).',
-    }),
+  missingIdentifier: () => err('validation', 'Either email or customer_id is required. Formats: email or C-XXXX.'),
 
-  // Validation: customer not found by email
-  emailNotFound: (email) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.VALIDATION,
-      isRetryable: false,
-      message: `No customer found with email: ${email}. Verify the email address with the customer.`,
-    }),
-
-  // Validation: customer not found by ID
-  idNotFound: (customerId) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.VALIDATION,
-      isRetryable: false,
-      message: `No customer found with ID: ${customerId}. Customer IDs use format C-XXXX.`,
-    }),
-
-  // Success: single customer match
-  found: (customer) => createSuccessResponse(customer),
-
-  // Success: multiple matches (ambiguous)
-  multipleMatches: (customers) =>
-    createSuccessResponse({
-      multiple_matches: customers,
-      disambiguation_needed: true,
-      message: 'Multiple customers found. Ask for email or customer ID to disambiguate.',
-    }),
+  // Validation: customer not found
+  emailNotFound: (email) => err('validation', `No customer found with email: ${email}. Verify with the customer.`),
+  idNotFound: (id) => err('validation', `No customer found with ID: ${id}. Customer IDs use format C-XXXX.`),
 };
 
-// ─── lookup_order Error Responses ──────────────────────────────────────────
+// ─── lookup_order Error Catalog ───────────────────────────────────────────
 
-export const orderErrors = {
+export const orderErrorPatterns = {
   // Validation: missing required fields
-  missingFields: () =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.VALIDATION,
-      isRetryable: false,
-      message:
-        'Both order_id and customer_id are required. ' +
-        'Call get_customer first to obtain the customer ID.',
-    }),
+  missingFields: () => err('validation', 'Both order_id and customer_id required. Call get_customer first.'),
 
   // Validation: order not found
-  orderNotFound: (orderId) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.VALIDATION,
-      isRetryable: false,
-      message: `No order found with ID: ${orderId}. Order IDs use format ORD-XXXX.`,
-    }),
+  orderNotFound: (orderId) => err('validation', `No order found: ${orderId}. Order IDs use format ORD-XXXX.`),
 
   // Permission: order belongs to a different customer
   ownershipMismatch: (orderId, customerId) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.PERMISSION,
-      isRetryable: false,
-      message:
-        `Order ${orderId} does not belong to customer ${customerId}. ` +
-        'Verify the customer identity before retrying.',
-    }),
-
-  // Success: order found and ownership verified
-  found: (order) => createSuccessResponse(order),
+    err('permission', `Order ${orderId} does not belong to customer ${customerId}.`),
 };
 
-// ─── process_refund Error Responses ────────────────────────────────────────
+// ─── process_refund Error Catalog ─────────────────────────────────────────
 
-export const refundErrors = {
-  // Validation: order not found
-  orderNotFound: (orderId) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.VALIDATION,
-      isRetryable: false,
-      message: `No order found with ID: ${orderId}. Verify the order number.`,
-    }),
-
-  // Permission: order belongs to a different customer
-  ownershipMismatch: (orderId, customerId) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.PERMISSION,
-      isRetryable: false,
-      message:
-        `Order ${orderId} does not belong to customer ${customerId}. ` +
-        'Cannot process refund for another customer\'s order.',
-    }),
-
+export const refundErrorPatterns = {
   // Business: order not in refundable status
   notDelivered: (orderId, currentStatus) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.BUSINESS,
-      isRetryable: false,
-      message:
-        `Order ${orderId} is in "${currentStatus}" status. ` +
-        'Only delivered orders can be refunded. ' +
-        (currentStatus === 'shipped'
-          ? 'The order is still in transit — the customer can request a refund once delivered.'
-          : currentStatus === 'pending'
-            ? 'The order has not shipped yet — suggest cancellation instead of refund.'
-            : `Current status "${currentStatus}" does not qualify for refund.`),
-    }),
+    err('business', `Order ${orderId} is "${currentStatus}" — only delivered orders can be refunded.`),
 
-  // Business: refund amount exceeds order total
-  amountExceedsTotal: (amount, orderTotal) =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.BUSINESS,
-      isRetryable: false,
-      message:
-        `Refund amount $${amount.toFixed(2)} exceeds order total $${orderTotal.toFixed(2)}. ` +
-        `Maximum refund is $${orderTotal.toFixed(2)}.`,
-    }),
+  // Business: refund amount exceeds total
+  amountExceedsTotal: (amount, total) =>
+    err('business', `Refund $${amount} exceeds order total $${total}.`),
 
-  // Success: refund processed (may need approval)
-  processed: (refund) => createSuccessResponse(refund),
-
-  // Success: refund pending human approval (amount > $100)
-  pendingApproval: (refund) =>
-    createSuccessResponse({
-      ...refund,
-      note:
-        'Refund exceeds $100 and requires human approval. ' +
-        'The customer will be notified within 5 business days.',
-    }),
+  // Permission: wrong customer
+  ownershipMismatch: (orderId, customerId) =>
+    err('permission', `Order ${orderId} does not belong to ${customerId}. Cannot process refund.`),
 };
 
-// ─── escalate_to_human Error Responses ─────────────────────────────────────
+// ─── escalate_to_human Error Catalog ──────────────────────────────────────
 
-export const escalationErrors = {
+export const escalationErrorPatterns = {
   // Validation: missing required fields
-  missingSummary: () =>
-    createErrorResponse({
-      errorCategory: ERROR_CATEGORIES.VALIDATION,
-      isRetryable: false,
-      message: 'issue_summary and priority are required for escalation.',
-    }),
-
-  // Success: escalation ticket created
-  created: (ticket) => createSuccessResponse(ticket),
+  missingSummary: () => err('validation', 'issue_summary and priority are required for escalation.'),
 };
 
-// ─── Error Handling Decision Matrix ────────────────────────────────────────
-// This matrix summarizes the agent's recovery strategy for each error.
-// Use this as a reference when building the error handling section of
-// the system prompt.
+// ─── Error Recovery Matrix ────────────────────────────────────────────────
+// EXAM KEY CONCEPT: This matrix maps error categories to agent strategies.
+// Include a version of this in the system prompt so the agent knows how
+// to handle each error type.
 
 export const errorRecoveryMatrix = {
   transient: {
@@ -195,7 +98,7 @@ export const errorRecoveryMatrix = {
   },
   validation: {
     strategy: 'Fix input and make a new call',
-    maxRetries: 0, // Different input = new call, not retry
+    maxRetries: 0,  // Different input = new call, not retry
     agentAction: 'Parse error message, correct the input format',
     userMessage: 'Ask customer for correct identifier if needed',
   },
@@ -212,3 +115,30 @@ export const errorRecoveryMatrix = {
     userMessage: 'Ask customer to confirm their identity',
   },
 };
+
+// ─── Demonstration ────────────────────────────────────────────────────────
+
+function demonstrateErrorPatterns() {
+  console.log('Task 2.2 Scenario 1: CSR Error Response Patterns\n');
+
+  console.log('--- get_customer errors ---');
+  console.log(JSON.stringify(customerErrorPatterns.missingIdentifier(), null, 2));
+  console.log(JSON.stringify(customerErrorPatterns.emailNotFound('unknown@test.com'), null, 2));
+
+  console.log('\n--- lookup_order errors ---');
+  console.log(JSON.stringify(orderErrorPatterns.ownershipMismatch('ORD-5001', 'C-1002'), null, 2));
+
+  console.log('\n--- process_refund errors ---');
+  console.log(JSON.stringify(refundErrorPatterns.notDelivered('ORD-5002', 'shipped'), null, 2));
+
+  console.log('\n--- Recovery Matrix ---');
+  for (const [category, strategy] of Object.entries(errorRecoveryMatrix)) {
+    console.log(`  ${category}: ${strategy.strategy} (retries: ${strategy.maxRetries})`);
+  }
+}
+
+// Run if executed directly
+const isDirectExecution = import.meta.url === `file://${process.argv[1]}`;
+if (isDirectExecution) {
+  demonstrateErrorPatterns();
+}

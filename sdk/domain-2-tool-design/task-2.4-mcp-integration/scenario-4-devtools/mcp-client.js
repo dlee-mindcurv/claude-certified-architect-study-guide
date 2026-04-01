@@ -1,436 +1,169 @@
 /**
- * Scenario 4 (Dev Productivity) — MCP Client for Code Analysis
+ * Scenario 4 (Dev Productivity) — MCP Server for Code Analysis
  *
- * Exam relevance: Task 2.4 (MCP client integration in agent code)
+ * Exam relevance: Task 2.4 (MCP integration in agent code)
  *
- * This module demonstrates how an agent SDK connects to an MCP server
- * that provides code analysis tools. The pattern is:
+ * EXAM KEY CONCEPT:
+ *   Use createSdkMcpServer() to define domain-specific MCP servers.
+ *   Each server bundles related tools for a capability domain.
+ *   The agent discovers tools as mcp__{serverName}__{toolName}.
  *
- * 1. Initialize MCP client at startup
- * 2. Connect to the code analysis server via stdio transport
- * 3. Discover available tools dynamically
- * 4. Convert tool definitions to Anthropic API format
- * 5. Provide a unified tool executor that routes calls to MCP
+ * This module creates a dev productivity MCP server with:
+ * - analyze_complexity: cyclomatic complexity analysis
+ * - find_unused_exports: dead code detection
+ * - suggest_refactoring: actionable refactoring suggestions
  *
- * In production, you would use the official MCP client SDK. This module
- * uses a mock implementation that demonstrates the same API surface
- * and integration patterns.
+ * The server is exported for use in query() options.mcpServers.
  */
 
-import {
-  createErrorResponse,
-  createSuccessResponse,
-  ERROR_CATEGORIES,
-} from '../../../../shared/schemas/error-response.js';
+import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 
-// ─── Mock Code Analysis MCP Server ─────────────────────────────────────────
-// Simulates an MCP server that analyzes code quality and dependencies.
+// ─── Tool Definitions ─────────────────────────────────────────────────────
 
-const codeAnalysisServer = {
-  name: 'code-analysis',
-  transport: 'stdio',
+export const analyzeComplexityTool = tool(
+  'analyze_complexity',
+  'Analyze cyclomatic complexity of a source file or directory. Returns ' +
+  'per-function scores, file average, and flags functions above threshold ' +
+  '(default: 10). Use to identify overly complex functions for refactoring.',
+  {
+    path: z.string().describe('File or directory path relative to project root'),
+    threshold: z.number().optional().describe('Complexity threshold for flagging (default: 10)'),
+  },
+  async ({ path, threshold = 10 }) => {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        path,
+        averageComplexity: 5.3,
+        functions: [
+          { name: 'processRequest', complexity: 12, flagged: true },
+          { name: 'validateInput', complexity: 8, flagged: false },
+          { name: 'formatResponse', complexity: 3, flagged: false },
+        ],
+        threshold,
+        flaggedCount: 1,
+        recommendation: 'processRequest exceeds complexity threshold. Consider extracting conditional branches.',
+      }) }],
+    };
+  },
+);
 
-  // tools/list response
-  tools: [
-    {
-      name: 'analyze_complexity',
-      description:
-        'Analyze the cyclomatic complexity of a source file or directory. Returns ' +
-        'per-function complexity scores, the file average, and flags functions above ' +
-        'the threshold (default: 10). Accepts relative paths from the project root. ' +
-        'Use this to identify overly complex functions that should be refactored.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description:
-              'File or directory path relative to project root (e.g., "src/utils.js" or "src/")',
+export const findUnusedExportsTool = tool(
+  'find_unused_exports',
+  'Find exported symbols (functions, classes, constants) never imported by ' +
+  'any other file. Returns symbol name, file path, and export type. ' +
+  'Useful for identifying dead code that can be safely removed.',
+  {
+    directory: z.string().optional().describe('Directory to scan (default: "src/")'),
+    include_tests: z.boolean().optional().describe('Include test files in import analysis'),
+  },
+  async ({ directory = 'src/', include_tests = false }) => {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        directory,
+        unusedExports: [
+          { symbol: 'legacyFormat', file: 'src/utils.js', type: 'function' },
+          { symbol: 'DEBUG_MODE', file: 'src/config.js', type: 'constant' },
+          { symbol: 'OldApiClient', file: 'src/api.js', type: 'class' },
+        ],
+        totalExports: 45,
+        unusedCount: 3,
+        recommendation: 'Consider removing unused exports to reduce bundle size.',
+      }) }],
+    };
+  },
+);
+
+export const suggestRefactoringTool = tool(
+  'suggest_refactoring',
+  'Analyze a file for refactoring opportunities: long functions, deeply ' +
+  'nested conditionals, duplicated logic, and parameter bloat. Returns ' +
+  'specific, actionable suggestions with location and impact rating.',
+  {
+    file_path: z.string().describe('Source file path relative to project root'),
+    focus: z.enum(['complexity', 'duplication', 'naming', 'all']).optional()
+      .describe('Focus area for suggestions (default: "all")'),
+  },
+  async ({ file_path, focus = 'all' }) => {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        file: file_path,
+        suggestions: [
+          {
+            type: 'extract_function',
+            location: 'line 45-78',
+            description: 'Extract validation logic into a separate validateOrder function',
+            impact: 'high',
           },
-          threshold: {
-            type: 'number',
-            description: 'Complexity threshold for flagging (default: 10)',
+          {
+            type: 'reduce_nesting',
+            location: 'line 92-130',
+            description: 'Use early returns to reduce nesting depth from 4 to 2',
+            impact: 'medium',
           },
+        ],
+        focusArea: focus,
+      }) }],
+    };
+  },
+);
+
+// ─── Bundled MCP Server ───────────────────────────────────────────────────
+// EXAM KEY CONCEPT: createSdkMcpServer() bundles related tools into a
+// namespaced MCP server. Tools become mcp__devtools__analyze_complexity, etc.
+
+export const devtoolsServer = createSdkMcpServer({
+  name: 'devtools',
+  version: '1.0.0',
+  tools: [analyzeComplexityTool, findUnusedExportsTool, suggestRefactoringTool],
+});
+
+// ─── Demonstration ────────────────────────────────────────────────────────
+
+async function demonstrate() {
+  console.log('Scenario 4: Dev Productivity MCP Server\n');
+
+  console.log('MCP Server: devtools (v1.0.0)');
+  console.log('Tools:');
+  console.log('  - mcp__devtools__analyze_complexity');
+  console.log('  - mcp__devtools__find_unused_exports');
+  console.log('  - mcp__devtools__suggest_refactoring\n');
+
+  // Run agent with the devtools MCP server
+  for await (const message of query({
+    prompt:
+      'Analyze the complexity of src/index.js, find any unused exports in ' +
+      'the src/ directory, and suggest refactoring improvements for src/index.js.',
+    options: {
+      system:
+        'You are a code quality assistant. Use the available tools to analyze ' +
+        'the codebase and provide actionable improvement recommendations.',
+      mcpServers: [devtoolsServer],
+      maxTurns: 8,
+      hooks: {
+        postToolUse: async ({ toolName, toolInput }) => {
+          console.log(`  Tool: ${toolName}(${JSON.stringify(toolInput)})`);
         },
-        required: ['path'],
       },
     },
-    {
-      name: 'find_unused_exports',
-      description:
-        'Find exported symbols (functions, classes, constants) that are never imported ' +
-        'by any other file in the project. Returns the symbol name, file path, and ' +
-        'export type. Useful for identifying dead code that can be safely removed.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          directory: {
-            type: 'string',
-            description: 'Directory to scan (default: "src/")',
-          },
-          include_tests: {
-            type: 'boolean',
-            description: 'Include test files in import analysis (default: false)',
-          },
-        },
-      },
-    },
-    {
-      name: 'suggest_refactoring',
-      description:
-        'Analyze a file for common refactoring opportunities: long functions, ' +
-        'deeply nested conditionals, duplicated logic, and parameter bloat. ' +
-        'Returns specific, actionable suggestions with before/after examples.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          file_path: {
-            type: 'string',
-            description: 'Source file path relative to project root',
-          },
-          focus: {
-            type: 'string',
-            enum: ['complexity', 'duplication', 'naming', 'all'],
-            description: 'Focus area for refactoring suggestions (default: "all")',
-          },
-        },
-        required: ['file_path'],
-      },
-    },
-  ],
-
-  // resources/list response
-  resources: [
-    {
-      uri: 'project://file-tree',
-      name: 'Project File Tree',
-      description: 'Complete directory structure of the project',
-      mimeType: 'application/json',
-    },
-    {
-      uri: 'project://quality-report',
-      name: 'Quality Report',
-      description: 'Latest code quality metrics for the entire project',
-      mimeType: 'application/json',
-    },
-  ],
-};
-
-// ─── Mock MCP Client ───────────────────────────────────────────────────────
-
-class DevToolsMcpClient {
-  constructor() {
-    this.connected = false;
-    this.server = null;
-  }
-
-  /**
-   * Connect to the code analysis MCP server.
-   *
-   * In production:
-   * - Spawns the server as a child process
-   * - Establishes MCP protocol handshake over stdin/stdout
-   * - Negotiates capabilities
-   *
-   * @param {string} transport - 'stdio' or 'sse'
-   * @param {Object} config - Server configuration
-   */
-  async connect(transport, config) {
-    if (transport !== 'stdio') {
-      throw new Error(`Unsupported transport: ${transport}. Use 'stdio' or 'sse'.`);
-    }
-
-    console.log(`[MCP] Connecting to ${config.command} ${config.args.join(' ')}`);
-    console.log(`[MCP] Environment: ${JSON.stringify(config.env || {})}`);
-
-    // Simulate connection and handshake
-    this.server = codeAnalysisServer;
-    this.connected = true;
-
-    console.log('[MCP] Connection established');
-    console.log(`[MCP] Server: ${this.server.name}`);
-    console.log(`[MCP] Tools: ${this.server.tools.length}`);
-    console.log(`[MCP] Resources: ${this.server.resources.length}`);
-
-    return this;
-  }
-
-  /**
-   * List available tools from the connected server.
-   *
-   * MCP protocol: tools/list
-   * Returns tool definitions in MCP format (inputSchema, not input_schema).
-   */
-  async listTools() {
-    this._assertConnected();
-    return { tools: this.server.tools };
-  }
-
-  /**
-   * Call a tool on the connected server.
-   *
-   * MCP protocol: tools/call
-   * Returns tool result in MCP format (content array or isError).
-   */
-  async callTool(name, args) {
-    this._assertConnected();
-
-    // Validate tool exists
-    const tool = this.server.tools.find((t) => t.name === name);
-    if (!tool) {
-      return createErrorResponse({
-        errorCategory: ERROR_CATEGORIES.VALIDATION,
-        isRetryable: false,
-        message: `Unknown tool: ${name}. Available: ${this.server.tools.map((t) => t.name).join(', ')}`,
-      });
-    }
-
-    // Mock implementations
-    return this._executeTool(name, args);
-  }
-
-  /**
-   * List available resources.
-   *
-   * MCP protocol: resources/list
-   */
-  async listResources() {
-    this._assertConnected();
-    return { resources: this.server.resources };
-  }
-
-  /**
-   * Read a resource by URI.
-   *
-   * MCP protocol: resources/read
-   */
-  async readResource(uri) {
-    this._assertConnected();
-
-    const resource = this.server.resources.find((r) => r.uri === uri);
-    if (!resource) {
-      return createErrorResponse({
-        errorCategory: ERROR_CATEGORIES.VALIDATION,
-        isRetryable: false,
-        message: `Resource not found: ${uri}`,
-      });
-    }
-
-    // Mock resource content
-    if (uri === 'project://file-tree') {
-      return createSuccessResponse({
-        uri,
-        mimeType: resource.mimeType,
-        content: {
-          root: 'my-project',
-          directories: ['src', 'tests', 'config'],
-          files: {
-            'src/': ['index.js', 'utils.js', 'api.js', 'middleware.js'],
-            'tests/': ['index.test.js', 'utils.test.js'],
-            'config/': ['default.json', 'production.json'],
-          },
-        },
-      });
-    }
-
-    if (uri === 'project://quality-report') {
-      return createSuccessResponse({
-        uri,
-        mimeType: resource.mimeType,
-        content: {
-          timestamp: new Date().toISOString(),
-          overallScore: 82,
-          metrics: {
-            complexity: { average: 5.3, max: 18, threshold: 10 },
-            coverage: { line: 74, branch: 62 },
-            unusedExports: 4,
-            duplicateBlocks: 7,
-          },
-        },
-      });
-    }
-
-    return createSuccessResponse({ uri, content: null });
-  }
-
-  /**
-   * Convert MCP tool definitions to Anthropic API format.
-   *
-   * MCP uses 'inputSchema'; the Anthropic API uses 'input_schema'.
-   * This conversion is necessary when passing discovered tools to
-   * the Claude API.
-   */
-  toAnthropicFormat(mcpTools) {
-    return mcpTools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema,
-    }));
-  }
-
-  // ── Internal ───────────────────────────────────────────────────────────
-
-  _assertConnected() {
-    if (!this.connected) {
-      throw new Error('MCP client is not connected. Call connect() first.');
+  })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      console.log(`\n  Result: ${message.result.substring(0, 300)}...`);
     }
   }
 
-  _executeTool(name, args) {
-    switch (name) {
-      case 'analyze_complexity':
-        return createSuccessResponse({
-          path: args.path,
-          averageComplexity: 5.3,
-          functions: [
-            { name: 'processRequest', complexity: 12, flagged: true },
-            { name: 'validateInput', complexity: 8, flagged: false },
-            { name: 'formatResponse', complexity: 3, flagged: false },
-          ],
-          threshold: args.threshold || 10,
-          flaggedCount: 1,
-          recommendation: 'processRequest exceeds complexity threshold. Consider extracting conditional branches.',
-        });
-
-      case 'find_unused_exports':
-        return createSuccessResponse({
-          directory: args.directory || 'src/',
-          unusedExports: [
-            { symbol: 'legacyFormat', file: 'src/utils.js', type: 'function' },
-            { symbol: 'DEBUG_MODE', file: 'src/config.js', type: 'constant' },
-            { symbol: 'OldApiClient', file: 'src/api.js', type: 'class' },
-          ],
-          totalExports: 45,
-          unusedCount: 3,
-          recommendation: 'Consider removing unused exports to reduce bundle size.',
-        });
-
-      case 'suggest_refactoring':
-        return createSuccessResponse({
-          file: args.file_path,
-          suggestions: [
-            {
-              type: 'extract_function',
-              location: 'line 45-78',
-              description: 'Extract validation logic into a separate validateOrder function',
-              impact: 'high',
-            },
-            {
-              type: 'reduce_nesting',
-              location: 'line 92-130',
-              description: 'Use early returns to reduce nesting depth from 4 to 2',
-              impact: 'medium',
-            },
-          ],
-          focusArea: args.focus || 'all',
-        });
-
-      default:
-        return createErrorResponse({
-          errorCategory: ERROR_CATEGORIES.VALIDATION,
-          isRetryable: false,
-          message: `Unknown tool: ${name}`,
-        });
-    }
-  }
-}
-
-// ─── Integration Helper ────────────────────────────────────────────────────
-// Creates a fully configured MCP client for the dev productivity scenario.
-
-/**
- * Initialize the MCP client for the developer productivity agent.
- *
- * This is the entry point that an agent would call at startup:
- * 1. Connect to the code analysis server
- * 2. Discover available tools
- * 3. Load project context from resources
- * 4. Return everything the agent needs to start
- *
- * @returns {Object} { tools, executeTool, projectContext }
- */
-export async function initializeDevToolsMcp() {
-  const mcpClient = new DevToolsMcpClient();
-
-  // Step 1: Connect
-  await mcpClient.connect('stdio', {
-    command: 'node',
-    args: ['./tools/code-analysis-server.js'],
-    env: { PROJECT_ROOT: process.cwd() },
-  });
-
-  // Step 2: Discover tools
-  const { tools: mcpTools } = await mcpClient.listTools();
-  const anthropicTools = mcpClient.toAnthropicFormat(mcpTools);
-
-  // Step 3: Load project context
-  const fileTree = await mcpClient.readResource('project://file-tree');
-  const qualityReport = await mcpClient.readResource('project://quality-report');
-
-  const projectContext = {
-    fileTree: JSON.parse(fileTree.content),
-    qualityReport: JSON.parse(qualityReport.content),
-  };
-
-  // Step 4: Create tool executor
-  async function executeTool(name, input) {
-    return mcpClient.callTool(name, input);
-  }
-
-  return {
-    tools: anthropicTools,
-    executeTool,
-    projectContext,
-    mcpClient, // Expose for resource reading during the session
-  };
-}
-
-// ─── Demonstration ─────────────────────────────────────────────────────────
-
-export async function demonstrateMcpClient() {
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  Scenario 4: Dev Productivity MCP Client                  ║');
-  console.log('╚════════════════════════════════════════════════════════════╝\n');
-
-  const { tools, executeTool, projectContext } = await initializeDevToolsMcp();
-
-  console.log(`\nDiscovered ${tools.length} tools:`);
-  for (const tool of tools) {
-    console.log(`  - ${tool.name}: ${tool.description.substring(0, 60)}...`);
-  }
-
-  console.log('\nProject context loaded:');
-  console.log(`  File tree root: ${projectContext.fileTree.root}`);
-  console.log(`  Quality score: ${projectContext.qualityReport.content.overallScore}/100`);
-
-  console.log('\nTesting tool calls:\n');
-
-  // Test each tool
-  const complexityResult = await executeTool('analyze_complexity', {
-    path: 'src/index.js',
-  });
-  console.log(
-    `  analyze_complexity: ${JSON.parse(complexityResult.content).flaggedCount} flagged functions`
-  );
-
-  const unusedResult = await executeTool('find_unused_exports', {
-    directory: 'src/',
-  });
-  console.log(
-    `  find_unused_exports: ${JSON.parse(unusedResult.content).unusedCount} unused exports`
-  );
-
-  const refactorResult = await executeTool('suggest_refactoring', {
-    file_path: 'src/index.js',
-    focus: 'complexity',
-  });
-  console.log(
-    `  suggest_refactoring: ${JSON.parse(refactorResult.content).suggestions.length} suggestions`
-  );
+  console.log(`
+  EXAM KEY CONCEPT:
+  - createSdkMcpServer() bundles domain tools into a namespace
+  - Pass via mcpServers option in query()
+  - Agent auto-discovers tools from all connected servers
+  - Multiple servers can coexist (devtools + csr + research)
+  - Tool names: mcp__{serverName}__{toolName} (no collisions)
+  `);
 }
 
 // Run if executed directly
 const isDirectExecution = import.meta.url === `file://${process.argv[1]}`;
 if (isDirectExecution) {
-  demonstrateMcpClient().catch(console.error);
+  demonstrate().catch(console.error);
 }

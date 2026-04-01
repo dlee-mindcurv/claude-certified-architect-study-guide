@@ -8,20 +8,13 @@
  * - Confidence threshold filters low-confidence findings
  *
  * This module defines the complete review criteria configuration for a CI/CD
- * pipeline, including severity definitions, skip rules, and false positive
- * tracking infrastructure.
+ * pipeline. Uses Agent SDK query() with explicit review criteria in the prompt.
  *
  * Run: node sdk/domain-4-prompt-engineering/task-4.1-explicit-criteria/scenario-5-ci/review-criteria.js
  */
 
-import 'dotenv/config';
-import Anthropic from '@anthropic-ai/sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { reviewCriteriaPrompt } from '../../../../shared/prompts/review-criteria.js';
-
-// ─── Configuration ──────────────────────────────────────────────────────────
-
-const client = new Anthropic();
-const MODEL = 'claude-sonnet-4-20250514';
 
 // ─── Severity Definitions ───────────────────────────────────────────────────
 //
@@ -70,9 +63,6 @@ const SEVERITY_DEFINITIONS = {
 };
 
 // ─── Skip Rules ─────────────────────────────────────────────────────────────
-//
-// EXAM KEY CONCEPT: Explicit skip rules prevent false positives on
-// low-value findings that erode developer trust.
 
 const SKIP_RULES = [
   'Minor style preferences (semicolons, trailing commas, bracket placement)',
@@ -85,10 +75,6 @@ const SKIP_RULES = [
 ];
 
 // ─── Suppressed Patterns ────────────────────────────────────────────────────
-//
-// EXAM KEY CONCEPT: When a detected_pattern consistently produces false
-// positives (>30% FP rate), temporarily suppress it while improving the
-// prompt criteria. This preserves trust in high-value categories.
 
 const SUPPRESSED_PATTERNS = [
   // 'unused-import',      // Example: suppressed due to 45% FP rate in week 3
@@ -103,34 +89,27 @@ const CONFIDENCE_THRESHOLD = 0.8;
 
 /**
  * Run a code review with explicit criteria against the provided diff.
+ * Uses Agent SDK query() with the review criteria prompt as context.
  *
- * @param {string} codeDiff - The code changes to review (unified diff format or raw code)
+ * @param {string} codeDiff - The code changes to review
  * @returns {object} Filtered findings with false positive tracking metadata
  */
 async function reviewWithExplicitCriteria(codeDiff) {
   console.log('Running review with explicit criteria...\n');
 
-  // ── Step 1: Send code through the review criteria prompt ────────────
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 4096,
-    messages: [
-      {
-        role: 'user',
-        content: `${reviewCriteriaPrompt}\n\n## Code to Review\n\n\`\`\`\n${codeDiff}\n\`\`\``,
-      },
-    ],
-  });
+  // ── Step 1: Send code through the review criteria prompt via query() ──
+  const prompt = `${reviewCriteriaPrompt}\n\n## Code to Review\n\n\`\`\`\n${codeDiff}\n\`\`\``;
 
-  const rawText = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('\n');
+  let rawText = '';
+  for await (const message of query({ prompt })) {
+    if (message.type === 'result' && message.subtype === 'success') {
+      rawText = message.result;
+    }
+  }
 
   // ── Step 2: Parse the structured JSON output ────────────────────────
   let reviewResult;
   try {
-    // Extract JSON from the response (may be wrapped in markdown code fences)
     const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, rawText];
     reviewResult = JSON.parse(jsonMatch[1].trim());
   } catch (parseError) {
@@ -140,9 +119,6 @@ async function reviewWithExplicitCriteria(codeDiff) {
   }
 
   // ── Step 3: Filter by confidence threshold ──────────────────────────
-  //
-  // EXAM NOTE: The criteria prompt specifies >0.8 confidence threshold.
-  // Low-confidence findings are logged for analysis but not surfaced.
   const confidentFindings = reviewResult.findings.filter(f => {
     if (f.confidence < CONFIDENCE_THRESHOLD) {
       console.log(
@@ -154,9 +130,6 @@ async function reviewWithExplicitCriteria(codeDiff) {
   });
 
   // ── Step 4: Filter suppressed patterns ──────────────────────────────
-  //
-  // EXAM KEY CONCEPT: Suppressed patterns are removed from output but
-  // logged separately for ongoing false positive analysis.
   const activeFindings = confidentFindings.filter(f => {
     if (SUPPRESSED_PATTERNS.includes(f.detected_pattern)) {
       console.log(
@@ -196,10 +169,6 @@ async function reviewWithExplicitCriteria(codeDiff) {
  * EXAM KEY CONCEPT: This function takes human feedback (which findings were
  * false positives) and computes per-pattern FP rates. Patterns exceeding
  * the threshold are candidates for suppression.
- *
- * @param {Array} feedbackRecords - Array of { detected_pattern, is_false_positive }
- * @param {number} threshold - FP rate threshold for suppression (default 0.3)
- * @returns {object} Per-pattern FP rates and suppression recommendations
  */
 function analyzeFalsePositiveRates(feedbackRecords, threshold = 0.3) {
   const patternStats = {};
@@ -246,7 +215,6 @@ function analyzeFalsePositiveRates(feedbackRecords, threshold = 0.3) {
 async function main() {
   console.log('Task 4.1 / Scenario 5 -- CI Review with Explicit Criteria\n');
 
-  // Sample code with known issues
   const sampleDiff = `
 // File: src/api/users.js
 

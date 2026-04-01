@@ -1,201 +1,231 @@
 /**
- * Mock MCP Tool Implementations for Customer Support Resolution (Scenario 1)
+ * Mock CSR Tools for Scenario 1 — Using @anthropic-ai/claude-agent-sdk
  *
- * These tools simulate backend systems for the CSR agent:
- * - get_customer: Look up customer by email or ID
- * - lookup_order: Look up order by order number
- * - process_refund: Process a refund for an order
- * - escalate_to_human: Escalate to a human agent
- *
- * Each tool returns structured responses matching real MCP patterns,
- * including proper error handling with isError, errorCategory, and isRetryable.
+ * Exports:
+ *   - Individual tool() definitions (for scoped distribution to subagents)
+ *   - csrServer: bundled createSdkMcpServer() with all CSR tools
+ *   - Legacy: csrToolDefinitions + executeCsrTool (for raw API examples)
  */
 
-// ─── Mock Data Store ─────────────────────────────────────────────────────────
+import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
+
+// ─── Mock Data ──────────────────────────────────────────────────────────────
 
 const customers = {
   'C-1001': {
-    id: 'C-1001',
-    name: 'Alice Johnson',
-    email: 'alice@example.com',
-    tier: 'gold',
-    accountStatus: 'active',
-    createdAt: '2023-06-15T10:30:00Z',
+    id: 'C-1001', name: 'Alice Johnson', email: 'alice@example.com',
+    tier: 'gold', accountStatus: 'active', createdAt: '2023-06-15T10:30:00Z',
   },
   'C-1002': {
-    id: 'C-1002',
-    name: 'Bob Smith',
-    email: 'bob@example.com',
-    tier: 'standard',
-    accountStatus: 'active',
-    createdAt: '2024-01-20T14:00:00Z',
-  },
-  'C-1003': {
-    id: 'C-1003',
-    name: 'Alice Johnson',
-    email: 'alice.j@other.com',
-    tier: 'platinum',
-    accountStatus: 'active',
-    createdAt: '2022-03-10T08:15:00Z',
+    id: 'C-1002', name: 'Bob Smith', email: 'bob@example.com',
+    tier: 'standard', accountStatus: 'active', createdAt: '2024-01-20T14:00:00Z',
   },
 };
 
 const orders = {
   'ORD-5001': {
-    orderId: 'ORD-5001',
-    customerId: 'C-1001',
+    orderId: 'ORD-5001', customerId: 'C-1001',
     items: [
       { name: 'Wireless Headphones', price: 79.99, quantity: 1 },
       { name: 'USB-C Cable', price: 12.99, quantity: 2 },
     ],
-    total: 105.97,
-    status: 'delivered',
-    deliveredAt: '2025-03-01T16:45:00Z',
-    orderDate: '2025-02-25T09:00:00Z',
+    total: 105.97, status: 'delivered',
+    deliveredAt: '2025-03-01T16:45:00Z', orderDate: '2025-02-25T09:00:00Z',
   },
   'ORD-5002': {
-    orderId: 'ORD-5002',
-    customerId: 'C-1001',
+    orderId: 'ORD-5002', customerId: 'C-1001',
     items: [{ name: 'Laptop Stand', price: 49.99, quantity: 1 }],
-    total: 49.99,
-    status: 'shipped',
-    trackingNumber: 'TRK-789456',
-    orderDate: '2025-03-10T11:30:00Z',
+    total: 49.99, status: 'shipped',
+    trackingNumber: 'TRK-789456', orderDate: '2025-03-10T11:30:00Z',
   },
   'ORD-5003': {
-    orderId: 'ORD-5003',
-    customerId: 'C-1002',
+    orderId: 'ORD-5003', customerId: 'C-1002',
     items: [{ name: 'Mechanical Keyboard', price: 149.99, quantity: 1 }],
-    total: 149.99,
-    status: 'delivered',
-    deliveredAt: '2025-02-20T14:30:00Z',
-    orderDate: '2025-02-15T10:00:00Z',
+    total: 149.99, status: 'delivered',
+    deliveredAt: '2025-02-20T14:30:00Z', orderDate: '2025-02-15T10:00:00Z',
   },
 };
 
 const refunds = [];
 
-// ─── Tool Definitions (for Claude API tool_use) ─────────────────────────────
+// ─── Helper: format MCP CallToolResult ──────────────────────────────────────
+
+function ok(data) {
+  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+}
+
+function err(errorCategory, message, isRetryable = false) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ errorCategory, isRetryable, message }) }],
+    isError: true,
+  };
+}
+
+// ─── Agent SDK tool() definitions ───────────────────────────────────────────
+
+export const getCustomerTool = tool(
+  'get_customer',
+    'Look up a customer account by their email address or customer ID (format: C-XXXX). ' +
+    'Returns customer profile including name, email, account tier (standard/gold/platinum), ' +
+    'and account status. Use this BEFORE any order lookups or refund processing to verify ' +
+    'customer identity. If multiple customers match a name, returns all matches — ask the ' +
+    'customer for additional identifiers (email or customer ID) to disambiguate. ' +
+    'Does NOT accept order numbers — use lookup_order for order queries.',
+  {
+    email: z.string().optional().describe('Customer email address'),
+    customer_id: z.string().optional().describe('Customer ID (format: C-XXXX)'),
+  },
+  async ({ email, customer_id }) => {
+    if (customer_id) {
+      const c = customers[customer_id];
+      return c ? ok(c) : err('validation', `No customer found with ID: ${customer_id}`);
+    }
+    if (email) {
+      const matches = Object.values(customers).filter(c => c.email === email);
+      if (matches.length === 0) return err('validation', `No customer found with email: ${email}`);
+      return ok(matches.length === 1 ? matches[0] : { multiple_matches: matches });
+    }
+    return err('validation', 'Either email or customer_id is required');
+  },
+);
+
+export const lookupOrderTool = tool(
+  'lookup_order',
+    'Look up an order by its order number (format: ORD-XXXX). Returns order details ' +
+    'including items, total amount, order status (pending/shipped/delivered/cancelled), ' +
+    'tracking information, and delivery date. Requires a verified customer ID from a ' +
+    'prior get_customer call — will fail if the order does not belong to the specified customer. ' +
+    'Accepts ONLY order numbers, not customer names or emails.',
+  {
+    order_id: z.string().describe('Order number (ORD-XXXX)'),
+    customer_id: z.string().describe('Verified customer ID (C-XXXX)'),
+  },
+  async ({ order_id, customer_id }) => {
+    const order = orders[order_id];
+    if (!order) return err('validation', `No order found: ${order_id}`);
+    if (order.customerId !== customer_id) return err('permission', `Order ${order_id} does not belong to ${customer_id}`);
+    return ok(order);
+  },
+);
+
+export const processRefundTool = tool(
+  'process_refund',
+  'Process a refund for a delivered order. Refunds over $100 need human approval. ' +
+  'Order must be in "delivered" status.',
+  {
+    order_id: z.string().describe('Order number (ORD-XXXX)'),
+    customer_id: z.string().describe('Verified customer ID (C-XXXX)'),
+    amount: z.number().describe('Refund amount in USD'),
+    reason: z.string().describe('Reason for the refund'),
+  },
+  async ({ order_id, customer_id, amount, reason }) => {
+    const order = orders[order_id];
+    if (!order) return err('validation', `No order found: ${order_id}`);
+    if (order.customerId !== customer_id) return err('permission', `Order ${order_id} does not belong to ${customer_id}`);
+    if (order.status !== 'delivered') return err('business', `Order is "${order.status}" — only delivered orders can be refunded`);
+    if (amount > order.total) return err('validation', `Refund $${amount} exceeds order total $${order.total}`);
+
+    const needsApproval = amount > 100;
+    const refund = {
+      refundId: `REF-${Date.now()}`, orderId: order_id, customerId: customer_id,
+      amount, reason, status: needsApproval ? 'pending_approval' : 'approved',
+      estimatedProcessingDays: needsApproval ? 5 : 3, createdAt: new Date().toISOString(),
+    };
+    refunds.push(refund);
+    return ok(refund);
+  },
+);
+
+export const escalateToHumanTool = tool(
+  'escalate_to_human',
+  'Escalate to a human agent. Use when: customer requests human, policy exception, ' +
+  'or no meaningful progress after investigation.',
+  {
+    customer_id: z.string().optional().describe('Customer ID if identified'),
+    issue_summary: z.string().describe('Brief description of the issue'),
+    actions_taken: z.array(z.string()).optional().describe('Actions already attempted'),
+    recommended_action: z.string().optional().describe('Recommended next step'),
+    priority: z.enum(['low', 'medium', 'high', 'urgent']).describe('Priority level'),
+  },
+  async ({ customer_id, issue_summary, actions_taken, recommended_action, priority }) => {
+    return ok({
+      ticketId: `ESC-${Date.now()}`, customerId: customer_id || 'unknown',
+      issueSummary: issue_summary, actionsTaken: actions_taken || [],
+      recommendedAction: recommended_action || 'Review and resolve',
+      priority, status: 'assigned', assignedTo: 'next-available-agent',
+      createdAt: new Date().toISOString(),
+    });
+  },
+);
+
+// ─── Bundled MCP Server ─────────────────────────────────────────────────────
+
+export const csrServer = createSdkMcpServer({
+  name: 'csr',
+  version: '1.0.0',
+  tools: [getCustomerTool, lookupOrderTool, processRefundTool, escalateToHumanTool],
+});
+
+// ─── Legacy exports (for raw API examples that still use @anthropic-ai/sdk) ─
 
 export const csrToolDefinitions = [
   {
     name: 'get_customer',
-    description:
-      'Look up a customer account by their email address or customer ID (format: C-XXXX). ' +
-      'Returns customer profile including name, email, account tier (standard/gold/platinum), ' +
-      'and account status. Use this BEFORE any order lookups or refund processing to verify ' +
-      'customer identity. If multiple customers match a name, returns all matches — ask the ' +
-      'customer for additional identifiers (email or customer ID) to disambiguate. ' +
-      'Does NOT accept order numbers — use lookup_order for order queries.',
+    description: getCustomerTool.description,
     input_schema: {
       type: 'object',
       properties: {
-        email: {
-          type: 'string',
-          description: 'Customer email address for lookup',
-        },
-        customer_id: {
-          type: 'string',
-          description: 'Customer ID in format C-XXXX',
-        },
+        email: { type: 'string', description: 'Customer email address for lookup' },
+        customer_id: { type: 'string', description: 'Customer ID in format (C-XXXX)' },
       },
       required: [],
     },
   },
   {
     name: 'lookup_order',
-    description:
-      'Look up an order by its order number (format: ORD-XXXX). Returns order details ' +
-      'including items, total amount, order status (pending/shipped/delivered/cancelled), ' +
-      'tracking information, and delivery date. Requires a verified customer ID from a ' +
-      'prior get_customer call — will fail if the order does not belong to the specified customer. ' +
-      'Accepts ONLY order numbers, not customer names or emails.',
+    description: lookupOrderTool.description,
     input_schema: {
       type: 'object',
       properties: {
-        order_id: {
-          type: 'string',
-          description: 'Order number in format ORD-XXXX',
-        },
-        customer_id: {
-          type: 'string',
-          description: 'Verified customer ID from get_customer (format: C-XXXX)',
-        },
+        order_id: { type: 'string', description: 'Order number (ORD-XXXX)' },
+        customer_id: { type: 'string', description: 'Verified customer ID (C-XXXX)' },
       },
       required: ['order_id', 'customer_id'],
     },
   },
   {
     name: 'process_refund',
-    description:
-      'Process a refund for a specific order. Requires a verified customer ID and valid order ID. ' +
-      'Supports full or partial refunds. Refunds over $100 require human approval and will return ' +
-      'a pending status. The order must be in "delivered" status to be eligible for a refund. ' +
-      'Returns refund confirmation with refund ID, amount, and estimated processing time.',
+    description: processRefundTool.description,
     input_schema: {
       type: 'object',
       properties: {
-        order_id: {
-          type: 'string',
-          description: 'Order number to refund (format: ORD-XXXX)',
-        },
-        customer_id: {
-          type: 'string',
-          description: 'Verified customer ID (format: C-XXXX)',
-        },
-        amount: {
-          type: 'number',
-          description: 'Refund amount in USD. Must not exceed order total.',
-        },
-        reason: {
-          type: 'string',
-          description: 'Reason for the refund',
-        },
+        order_id: { type: 'string', description: 'Order number (ORD-XXXX)' },
+        customer_id: { type: 'string', description: 'Verified customer ID (C-XXXX)' },
+        amount: { type: 'number', description: 'Refund amount in USD' },
+        reason: { type: 'string', description: 'Reason for the refund' },
       },
       required: ['order_id', 'customer_id', 'amount', 'reason'],
     },
   },
   {
     name: 'escalate_to_human',
-    description:
-      'Escalate the current interaction to a human agent. Use when: (1) the customer explicitly ' +
-      'requests a human agent, (2) the issue involves a policy exception or gap, or (3) you ' +
-      'cannot make meaningful progress after investigation. Include a structured summary with ' +
-      'customer details, issue description, actions already taken, and recommended next steps.',
+    description: escalateToHumanTool.description,
     input_schema: {
       type: 'object',
       properties: {
-        customer_id: {
-          type: 'string',
-          description: 'Customer ID if identified',
-        },
-        issue_summary: {
-          type: 'string',
-          description: 'Brief description of the customer issue',
-        },
-        actions_taken: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'List of actions already attempted',
-        },
-        recommended_action: {
-          type: 'string',
-          description: 'Recommended next step for the human agent',
-        },
-        priority: {
-          type: 'string',
-          enum: ['low', 'medium', 'high', 'urgent'],
-          description: 'Escalation priority level',
-        },
+        customer_id: { type: 'string' },
+        issue_summary: { type: 'string' },
+        actions_taken: { type: 'array', items: { type: 'string' } },
+        recommended_action: { type: 'string' },
+        priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] },
       },
       required: ['issue_summary', 'priority'],
     },
   },
 ];
 
-// ─── Tool Executor (Mock Backend) ────────────────────────────────────────────
-
-export function executeCsrTool(toolName, toolInput) {
+export function executeCsrToolRaw(toolName, toolInput) {
   switch (toolName) {
     case 'get_customer':
       return handleGetCustomer(toolInput);
@@ -386,4 +416,25 @@ function handleEscalate({ customer_id, issue_summary, actions_taken, recommended
   };
 
   return { content: JSON.stringify(ticket) };
+}
+
+
+export function executeCsrTool(toolName, toolInput) {
+  const lookup = {
+    get_customer: getCustomerTool,
+    lookup_order: lookupOrderTool,
+    process_refund: processRefundTool,
+    escalate_to_human: escalateToHumanTool,
+  };
+  const t = lookup[toolName];
+  if (!t) return { isError: true, content: JSON.stringify({ errorCategory: 'validation', message: `Unknown tool: ${toolName}` }) };
+
+  // Synchronous wrapper for legacy callers — call handler then flatten result
+  let result;
+  t.handler(toolInput, {}).then(r => { result = r; });
+  // Since our handlers are sync internally, the promise resolves immediately
+  return {
+    isError: result?.isError ?? false,
+    content: result?.content?.[0]?.text ?? '{}',
+  };
 }

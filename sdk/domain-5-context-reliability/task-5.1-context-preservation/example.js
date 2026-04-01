@@ -1,20 +1,21 @@
 /**
- * Task 5.1 — Context Preservation with Persistent Case Facts Block
+ * Task 5.1 -- Context Preservation with Case Facts Block (Agent SDK)
  *
  * Exam relevance:
  * - Progressive summarization risks: condensing exact values into vague summaries
  * - "Lost in the middle" effect: weakened attention to mid-conversation content
+ * - Case facts block pattern: structured context injected at the TOP of every prompt
  * - Tool result accumulation consuming tokens unnecessarily
- * - Case facts block pattern: structured context at the top of every prompt
  *
- * This example demonstrates:
- * 1. After each tool call, extract key facts into a structured case facts object
- * 2. Inject the case facts block at the beginning of the system prompt each turn
- * 3. Trim verbose tool outputs to only the fields needed going forward
- * 4. Place key findings summaries at the beginning with explicit section headers
+ * EXAM KEY CONCEPT:
+ *   The case facts block is a structured object maintained OUTSIDE the conversation.
+ *   Before each turn, it is rendered into the system prompt at the BEGINNING
+ *   (highest-attention zone), ensuring critical facts survive context compaction.
+ *
+ * This example uses the raw @anthropic-ai/sdk to show the case-facts injection
+ * pattern explicitly, since the concept is about prompt construction per turn.
  */
 
-import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { csrToolDefinitions, executeCsrTool } from '../../../shared/tools/csr-tools.js';
 import { csrSystemPrompt } from '../../../shared/prompts/csr-system-prompt.js';
@@ -40,10 +41,6 @@ function createEmptyCaseFacts() {
 }
 
 // ─── Case Facts Rendering ─────────────────────────────────────────────────────
-//
-// Renders the case facts into a markdown block for injection into the system
-// prompt. Uses explicit section headers so Claude can locate these facts
-// reliably even in long contexts.
 
 function renderCaseFactsBlock(caseFacts) {
   const lines = ['## Current Case Facts (verified this session)'];
@@ -83,12 +80,10 @@ function renderCaseFactsBlock(caseFacts) {
 // ─── Fact Extraction from Tool Results ────────────────────────────────────────
 //
 // EXAM KEY CONCEPT: After EACH tool call, we extract relevant facts into the
-// case facts structure. This is not done once at the end -- it happens
-// incrementally so intermediate facts (like customer tier) are available
-// for subsequent decisions.
+// case facts structure. This happens incrementally so intermediate facts (like
+// customer tier) are available for subsequent decisions.
 
-function extractFactsFromToolResult(toolName, toolInput, rawResult, caseFacts) {
-  // Only process successful results
+function extractFactsFromToolResult(toolName, rawResult, caseFacts) {
   if (rawResult.isError) {
     caseFacts.actionsTaken.push(
       `${toolName} failed: ${JSON.parse(rawResult.content).message}`
@@ -99,73 +94,34 @@ function extractFactsFromToolResult(toolName, toolInput, rawResult, caseFacts) {
   const data = JSON.parse(rawResult.content);
 
   switch (toolName) {
-    case 'get_customer': {
-      // Handle single customer match
+    case 'get_customer':
       if (data.id) {
-        caseFacts.customer = {
-          id: data.id,
-          name: data.name,
-          email: data.email,
-          tier: data.tier,
-        };
-        caseFacts.actionsTaken.push(
-          `Verified customer: ${data.name} (${data.id}, ${data.tier} tier)`
-        );
+        caseFacts.customer = { id: data.id, name: data.name, email: data.email, tier: data.tier };
+        caseFacts.actionsTaken.push(`Verified customer: ${data.name} (${data.id}, ${data.tier} tier)`);
       }
-      // Handle multiple matches -- note the ambiguity as an open issue
       if (data.multiple_matches) {
-        caseFacts.openIssues.push(
-          `Multiple customer matches found (${data.multiple_matches.length}) -- need disambiguation`
-        );
-        caseFacts.actionsTaken.push(
-          `Customer lookup returned ${data.multiple_matches.length} matches`
-        );
+        caseFacts.openIssues.push(`Multiple customer matches (${data.multiple_matches.length}) -- need disambiguation`);
       }
       break;
-    }
 
     case 'lookup_order': {
-      const orderSummary = {
-        orderId: data.orderId,
-        total: data.total,
-        status: data.status,
-        deliveredAt: data.deliveredAt || null,
-      };
-      // Avoid duplicate entries for the same order
-      const existingIdx = caseFacts.orders.findIndex(o => o.orderId === data.orderId);
-      if (existingIdx >= 0) {
-        caseFacts.orders[existingIdx] = orderSummary;
-      } else {
-        caseFacts.orders.push(orderSummary);
-      }
-      caseFacts.actionsTaken.push(
-        `Looked up order ${data.orderId}: $${data.total}, ${data.status}`
-      );
+      const existing = caseFacts.orders.findIndex(o => o.orderId === data.orderId);
+      const summary = { orderId: data.orderId, total: data.total, status: data.status, deliveredAt: data.deliveredAt || null };
+      if (existing >= 0) caseFacts.orders[existing] = summary;
+      else caseFacts.orders.push(summary);
+      caseFacts.actionsTaken.push(`Looked up order ${data.orderId}: $${data.total}, ${data.status}`);
       break;
     }
 
-    case 'process_refund': {
-      caseFacts.refunds.push({
-        refundId: data.refundId,
-        amount: data.amount,
-        status: data.status,
-      });
-      caseFacts.actionsTaken.push(
-        `Processed refund ${data.refundId}: $${data.amount} (${data.status})`
-      );
-      // Remove from open issues if refund was the pending item
-      caseFacts.openIssues = caseFacts.openIssues.filter(
-        issue => !issue.includes('refund')
-      );
+    case 'process_refund':
+      caseFacts.refunds.push({ refundId: data.refundId, amount: data.amount, status: data.status });
+      caseFacts.actionsTaken.push(`Processed refund ${data.refundId}: $${data.amount} (${data.status})`);
+      caseFacts.openIssues = caseFacts.openIssues.filter(i => !i.includes('refund'));
       break;
-    }
 
-    case 'escalate_to_human': {
-      caseFacts.actionsTaken.push(
-        `Escalated to human agent: ticket ${data.ticketId} (${data.priority})`
-      );
+    case 'escalate_to_human':
+      caseFacts.actionsTaken.push(`Escalated to human: ticket ${data.ticketId} (${data.priority})`);
       break;
-    }
   }
 
   return caseFacts;
@@ -173,60 +129,34 @@ function extractFactsFromToolResult(toolName, toolInput, rawResult, caseFacts) {
 
 // ─── Tool Result Trimming ─────────────────────────────────────────────────────
 //
-// EXAM KEY CONCEPT: Verbose tool outputs waste context tokens. After extracting
-// key facts, we trim the raw result to only the fields needed for Claude's
-// next decision. The full data is preserved in the case facts block.
+// EXAM KEY CONCEPT: After extracting facts, trim verbose tool outputs to only
+// the fields needed for Claude's next decision. Full data is preserved in the
+// case facts block above.
 
 function trimToolResult(toolName, rawContent) {
   try {
     const data = JSON.parse(rawContent);
-
     switch (toolName) {
       case 'get_customer':
-        // Keep only fields Claude needs for follow-up decisions
-        if (data.multiple_matches) return rawContent; // Need full data for disambiguation
-        return JSON.stringify({
-          id: data.id,
-          name: data.name,
-          tier: data.tier,
-          accountStatus: data.accountStatus,
-        });
-
+        if (data.multiple_matches) return rawContent;
+        return JSON.stringify({ id: data.id, name: data.name, tier: data.tier, accountStatus: data.accountStatus });
       case 'lookup_order':
-        // Keep order summary but drop verbose item details if not needed
-        return JSON.stringify({
-          orderId: data.orderId,
-          total: data.total,
-          status: data.status,
-          deliveredAt: data.deliveredAt,
-          itemCount: data.items?.length,
-        });
-
-      case 'process_refund':
-        // Keep the full refund result (it is already concise)
-        return rawContent;
-
-      case 'escalate_to_human':
-        return rawContent;
-
+        return JSON.stringify({ orderId: data.orderId, total: data.total, status: data.status, deliveredAt: data.deliveredAt, itemCount: data.items?.length });
       default:
         return rawContent;
     }
   } catch {
-    return rawContent; // If parsing fails, return unchanged
+    return rawContent;
   }
 }
 
 // ─── Build System Prompt with Case Facts ──────────────────────────────────────
 //
-// EXAM KEY CONCEPT: The case facts block is injected at the BEGINNING of the
-// system prompt. This places it in the highest-attention zone of the context
-// window, countering the "lost in the middle" effect.
+// EXAM KEY CONCEPT: Case facts go FIRST, before the base system prompt, placing
+// them in the highest-attention zone and countering "lost in the middle."
 
 function buildSystemPromptWithFacts(caseFacts) {
-  const caseFactsBlock = renderCaseFactsBlock(caseFacts);
-  // Case facts go FIRST, before the base system prompt
-  return `${caseFactsBlock}\n\n---\n\n${csrSystemPrompt}`;
+  return `${renderCaseFactsBlock(caseFacts)}\n\n---\n\n${csrSystemPrompt}`;
 }
 
 // ─── Agentic Loop with Context Preservation ───────────────────────────────────
@@ -262,11 +192,7 @@ async function runAgentWithCaseFacts(userMessage) {
     });
 
     if (response.stop_reason === 'end_turn') {
-      const finalText = response.content
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('\n');
-
+      const finalText = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
       console.log(`\nAgent: ${finalText}`);
       console.log(`\n--- Completed in ${turnCount} turns ---`);
       console.log('\nFinal Case Facts:');
@@ -278,16 +204,13 @@ async function runAgentWithCaseFacts(userMessage) {
       messages.push({ role: 'assistant', content: response.content });
 
       const toolResults = [];
-      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
-
-      for (const toolUse of toolUseBlocks) {
+      for (const toolUse of response.content.filter(b => b.type === 'tool_use')) {
         console.log(`  Tool: ${toolUse.name}(${JSON.stringify(toolUse.input)})`);
 
-        // Execute the tool
         const rawResult = executeCsrTool(toolUse.name, toolUse.input);
 
         // STEP 1: Extract facts into the persistent case facts block
-        extractFactsFromToolResult(toolUse.name, toolUse.input, rawResult, caseFacts);
+        extractFactsFromToolResult(toolUse.name, rawResult, caseFacts);
 
         // STEP 2: Trim the verbose tool output to save context tokens
         const trimmedContent = rawResult.isError
@@ -296,7 +219,6 @@ async function runAgentWithCaseFacts(userMessage) {
 
         console.log(`  Result (trimmed): ${trimmedContent.substring(0, 80)}...`);
 
-        // Send the trimmed result back to Claude
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
@@ -317,7 +239,6 @@ async function runAgentWithCaseFacts(userMessage) {
 // ─── Demonstration ────────────────────────────────────────────────────────────
 
 async function main() {
-  // Multi-step interaction that benefits from case facts preservation
   console.log('\n>>> DEMO: Case facts persist across tool calls <<<');
   await runAgentWithCaseFacts(
     "Hi, I ordered some headphones and a cable (order ORD-5001) and they arrived " +
