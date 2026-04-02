@@ -23,7 +23,7 @@ import {
 
 // ─── Coordinator with Subagents ────────────────────────────────────────────
 
-async function runCoordinator(userQuery) {
+async function runCoordinator(userQuery: string): Promise<string> {
   console.log('\n' + '='.repeat(60));
   console.log('Research Coordinator -- Agent SDK Pattern');
   console.log('='.repeat(60));

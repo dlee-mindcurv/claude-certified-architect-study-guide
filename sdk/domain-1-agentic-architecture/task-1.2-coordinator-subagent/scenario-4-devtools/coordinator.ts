@@ -84,7 +84,7 @@ const devServer = createSdkMcpServer({
 
 // ─── Dev Productivity Coordinator ───────────────────────────────────────────
 
-export async function runDevCoordinator(userQuery) {
+export async function runDevCoordinator(userQuery: string): Promise<string> {
   console.log('\n' + '='.repeat(60));
   console.log('Dev Productivity Coordinator -- Scenario 4 (Agent SDK)');
   console.log('='.repeat(60));

@@ -8,22 +8,26 @@
 - `documentation/` — Exam guide PDF and cross-reference maps
 
 ## Conventions
+- TypeScript with `strict: true` — all `.ts` files, run with `tsx`
 - ES modules (`import`/`export`) — package.json has `"type": "module"`
 - Agent SDK examples use `query()` from `@anthropic-ai/claude-agent-sdk`
 - Raw API examples use `Anthropic` from `@anthropic-ai/sdk` (for tool_use, batch API concepts)
 - Mock tools use `tool()` + `createSdkMcpServer()` from the Agent SDK
 - Tool names follow MCP convention: `mcp__<server>__<tool>` (e.g., `mcp__csr__get_customer`)
-- Each task directory follows: `README.md`, `example-*.js`, `exercise.md`, `scenario-*/`
+- Each task directory follows: `README.md`, `example-*.ts`, `exercise.md`, `scenario-*/`
 
 ## Running Examples
 ```bash
 npm install
 
+# Type check
+npm run typecheck
+
 # Agent SDK examples
-node sdk/domain-1-agentic-architecture/task-1.1-agentic-loops/example-agent-sdk.js
+tsx sdk/domain-1-agentic-architecture/task-1.1-agentic-loops/example-agent-sdk.ts
 
 # Raw API examples
-node sdk/domain-1-agentic-architecture/task-1.1-agentic-loops/example-raw-api.js
+tsx sdk/domain-1-agentic-architecture/task-1.1-agentic-loops/example-raw-api.ts
 
 # Exercises
 npm run exercise:1

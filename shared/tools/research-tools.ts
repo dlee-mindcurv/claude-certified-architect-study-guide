@@ -11,9 +11,33 @@
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  publishedDate: string;
+  source: string;
+}
+
+interface Finding {
+  claim: string;
+  evidence: string;
+  confidence: string;
+  page: number;
+}
+
+interface Document {
+  title: string;
+  author: string;
+  publishedDate: string;
+  findings: Finding[];
+}
+
 // ─── Mock Data ──────────────────────────────────────────────────────────────
 
-const searchResults = {
+const searchResults: Record<string, SearchResult[]> = {
   'AI creative industries': [
     { title: 'AI Transforms Visual Arts: A 2025 Analysis', url: 'https://example.com/ai-visual-arts',
       snippet: 'ML models are revolutionizing digital art creation...', publishedDate: '2025-01-15', source: 'TechReview' },
@@ -28,7 +52,7 @@ const searchResults = {
   ],
 };
 
-const documents = {
+const documents: Record<string, Document> = {
   'doc-001': {
     title: 'State of AI in Creative Industries 2025', author: 'Research Institute', publishedDate: '2025-02-15',
     findings: [
@@ -47,12 +71,12 @@ const documents = {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function ok(data) {
-  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+function ok(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
 }
 
-function err(category, message, isRetryable = false) {
-  return { content: [{ type: 'text', text: JSON.stringify({ errorCategory: category, isRetryable, message }) }], isError: true };
+function err(category: string, message: string, isRetryable = false) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify({ errorCategory: category, isRetryable, message }) }], isError: true };
 }
 
 // ─── Agent SDK tool() definitions ───────────────────────────────────────────
@@ -67,7 +91,7 @@ export const webSearchTool = tool(
   },
   async ({ query, max_results = 5 }) => {
     const queryLower = query.toLowerCase();
-    let results = [];
+    let results: SearchResult[] = [];
     for (const [key, value] of Object.entries(searchResults)) {
       if (queryLower.includes(key.toLowerCase()) || key.toLowerCase().includes(queryLower)) {
         results = value;
@@ -144,11 +168,12 @@ export const researchToolDefinitions = [
     input_schema: { type: 'object', properties: { claim: { type: 'string' }, context: { type: 'string' } }, required: ['claim'] } },
 ];
 
-export function executeResearchTool(toolName, toolInput) {
-  const lookup = { web_search: webSearchTool, analyze_document: analyzeDocumentTool, verify_fact: verifyFactTool };
+export function executeResearchTool(toolName: string, toolInput: Record<string, unknown>) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lookup: Record<string, { handler: (args: any, extra: any) => Promise<any> } | undefined> = { web_search: webSearchTool, analyze_document: analyzeDocumentTool, verify_fact: verifyFactTool };
   const t = lookup[toolName];
   if (!t) return { isError: true, content: JSON.stringify({ errorCategory: 'validation', message: `Unknown: ${toolName}` }) };
-  let result;
-  t.handler(toolInput, {}).then(r => { result = r; });
-  return { isError: result?.isError ?? false, content: result?.content?.[0]?.text ?? '{}' };
+  let result: { isError?: boolean; content: Array<{ type: string; text?: string }> } | undefined;
+  t.handler(toolInput, {}).then((r: typeof result) => { result = r; });
+  return { isError: result?.isError ?? false, content: result!.content[0]!.text ?? '{}' };
 }

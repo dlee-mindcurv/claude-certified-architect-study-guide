@@ -26,7 +26,7 @@ import {
 
 // ─── Research Coordinator ───────────────────────────────────────────────────
 
-export async function runResearchCoordinator(userQuery) {
+export async function runResearchCoordinator(userQuery: string): Promise<{ report: string; elapsed: string }> {
   console.log('\n' + '='.repeat(70));
   console.log('  RESEARCH COORDINATOR -- Scenario 3 (Agent SDK)');
   console.log('='.repeat(70));

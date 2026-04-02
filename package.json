@@ -3,12 +3,13 @@
   "version": "1.0.0",
   "description": "Claude Certified Architect - Foundations exam preparation project with working examples for all 5 domains and 6 scenarios",
   "type": "module",
-  "main": "index.js",
+  "main": "index.ts",
   "scripts": {
-    "test": "node --test",
-    "exercise:1": "node exercises/exercise-1-multi-tool-agent/starter.js",
-    "exercise:3": "node exercises/exercise-3-data-extraction/starter.js",
-    "exercise:4": "node exercises/exercise-4-research-pipeline/starter.js"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test",
+    "exercise:1": "tsx exercises/exercise-1-multi-tool-agent/starter.ts",
+    "exercise:3": "tsx exercises/exercise-3-data-extraction/starter.ts",
+    "exercise:4": "tsx exercises/exercise-4-research-pipeline/starter.ts"
   },
   "private": true,
   "dependencies": {
@@ -16,6 +17,9 @@
     "@anthropic-ai/sdk": "^0.74.0"
   },
   "devDependencies": {
-    "dotenv": "^16.4.0"
+    "@types/node": "^25.5.0",
+    "dotenv": "^16.4.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
   }
 }
