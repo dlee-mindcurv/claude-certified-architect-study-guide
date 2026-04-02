@@ -21,6 +21,42 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface SessionMessage {
+  role: string;
+  content: string;
+}
+
+interface SessionMetadata {
+  createdAt?: string;
+  savedAt?: string;
+  turnCount?: number;
+  status?: string;
+  forkedFrom?: string;
+  forkPoint?: number;
+  archivedAt?: string;
+  finalFindings?: string;
+  [key: string]: unknown;
+}
+
+interface SessionData {
+  messages: SessionMessage[];
+  metadata: SessionMetadata;
+}
+
+interface SessionSummary {
+  name: string;
+  turns: number;
+  savedAt: string;
+  status: string;
+}
+
+interface HealthStatus {
+  status: string;
+  reason: string;
+}
+
 // ─── Session Store ──────────────────────────────────────────────────────────
 
 const SESSIONS_DIR = join(process.cwd(), '.sessions', 'devtools');
@@ -29,18 +65,18 @@ function ensureSessionDir() {
   if (!existsSync(SESSIONS_DIR)) mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
-function saveSession(name, data) {
+function saveSession(name: string, data: SessionData): void {
   ensureSessionDir();
   writeFileSync(join(SESSIONS_DIR, `${name}.json`), JSON.stringify(data, null, 2));
 }
 
-function loadSession(name) {
+function loadSession(name: string): SessionData | null {
   const filepath = join(SESSIONS_DIR, `${name}.json`);
   if (!existsSync(filepath)) return null;
   return JSON.parse(readFileSync(filepath, 'utf-8'));
 }
 
-function listSessions() {
+function listSessions(): SessionSummary[] {
   ensureSessionDir();
   return readdirSync(SESSIONS_DIR)
     .filter(f => f.endsWith('.json'))
@@ -67,7 +103,14 @@ When investigating:
 Always maintain a running summary of your findings.`;
 
 class InvestigationSession {
-  constructor(name, config = {}) {
+  name: string;
+  systemPrompt: string;
+  maxTurns: number;
+  staleThresholdMs: number;
+  messages: SessionMessage[];
+  metadata: SessionMetadata;
+
+  constructor(name: string, config: { systemPrompt?: string; maxTurns?: number; staleThresholdMs?: number } = {}) {
     this.name = name;
     this.systemPrompt = config.systemPrompt || DEFAULT_SYSTEM_PROMPT;
     this.maxTurns = config.maxTurns || 40;
@@ -84,7 +127,7 @@ class InvestigationSession {
    * 2. Session exists and is fresh: resume
    * 3. Session exists but is stale/overloaded: start fresh with summary
    */
-  async startOrResume(initialMessage, options = {}) {
+  async startOrResume(initialMessage: string, options: { forceFresh?: boolean; summary?: string } = {}): Promise<string> {
     const existing = loadSession(this.name);
 
     if (!existing) {
@@ -109,7 +152,7 @@ class InvestigationSession {
     return this.sendMessage(summary + '\n\n' + initialMessage);
   }
 
-  evaluateHealth(sessionData) {
+  evaluateHealth(sessionData: SessionData): HealthStatus {
     const savedAt = new Date(sessionData.metadata?.savedAt || 0);
     const ageMs = Date.now() - savedAt.getTime();
     const turns = sessionData.messages?.length ?? 0;
@@ -123,7 +166,7 @@ class InvestigationSession {
     return { status: 'healthy', reason: `${Math.round(ageMs / 60000)} min old, ${turns} turns.` };
   }
 
-  extractSummary(sessionData) {
+  extractSummary(sessionData: SessionData): string {
     const messages = sessionData.messages || [];
     const assistantMessages = messages
       .filter(m => m.role === 'assistant')
@@ -140,7 +183,7 @@ class InvestigationSession {
     ].join('\n');
   }
 
-  async sendMessage(userMessage) {
+  async sendMessage(userMessage: string): Promise<string> {
     this.messages.push({ role: 'user', content: userMessage });
 
     let responseText = '';
@@ -164,7 +207,7 @@ class InvestigationSession {
   /**
    * Fork this session into a new branch for parallel exploration.
    */
-  fork(forkName, config = {}) {
+  fork(forkName: string, config: { systemPrompt?: string; maxTurns?: number; staleThresholdMs?: number } = {}): InvestigationSession {
     const forked = new InvestigationSession(forkName, {
       systemPrompt: this.systemPrompt,
       ...config,
@@ -182,13 +225,13 @@ class InvestigationSession {
     return forked;
   }
 
-  save() {
+  save(): void {
     this.metadata.savedAt = new Date().toISOString();
     this.metadata.turnCount = this.messages.length;
     saveSession(this.name, { messages: this.messages, metadata: this.metadata });
   }
 
-  archive(findings = '') {
+  archive(findings = ''): void {
     this.metadata.status = 'archived';
     this.metadata.archivedAt = new Date().toISOString();
     this.metadata.finalFindings = findings;
@@ -271,7 +314,7 @@ async function demoStaleSessionHandling() {
     },
   });
 
-  const health = oldSession.evaluateHealth(loadSession('old-investigation'));
+  const health = oldSession.evaluateHealth(loadSession('old-investigation')!);
   console.log(`Session health: ${health.status}`);
   console.log(`Reason: ${health.reason}`);
 

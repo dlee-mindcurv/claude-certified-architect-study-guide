@@ -22,13 +22,13 @@ import { z } from 'zod';
 
 // ─── Helper: MCP tool result formatters ───────────────────────────────────
 
-function ok(data) {
-  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+function ok(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
 }
 
-function err(errorCategory, message, isRetryable = false) {
+function err(errorCategory: string, message: string, isRetryable = false) {
   return {
-    content: [{ type: 'text', text: JSON.stringify({ errorCategory, isRetryable, message }) }],
+    content: [{ type: 'text' as const, text: JSON.stringify({ errorCategory, isRetryable, message }) }],
     isError: true,   // EXAM KEY: this flag tells Claude the tool call failed
   };
 }
@@ -43,8 +43,8 @@ export const customerErrorPatterns = {
   missingIdentifier: () => err('validation', 'Either email or customer_id is required. Formats: email or C-XXXX.'),
 
   // Validation: customer not found
-  emailNotFound: (email) => err('validation', `No customer found with email: ${email}. Verify with the customer.`),
-  idNotFound: (id) => err('validation', `No customer found with ID: ${id}. Customer IDs use format C-XXXX.`),
+  emailNotFound: (email: string) => err('validation', `No customer found with email: ${email}. Verify with the customer.`),
+  idNotFound: (id: string) => err('validation', `No customer found with ID: ${id}. Customer IDs use format C-XXXX.`),
 };
 
 // ─── lookup_order Error Catalog ───────────────────────────────────────────
@@ -54,10 +54,10 @@ export const orderErrorPatterns = {
   missingFields: () => err('validation', 'Both order_id and customer_id required. Call get_customer first.'),
 
   // Validation: order not found
-  orderNotFound: (orderId) => err('validation', `No order found: ${orderId}. Order IDs use format ORD-XXXX.`),
+  orderNotFound: (orderId: string) => err('validation', `No order found: ${orderId}. Order IDs use format ORD-XXXX.`),
 
   // Permission: order belongs to a different customer
-  ownershipMismatch: (orderId, customerId) =>
+  ownershipMismatch: (orderId: string, customerId: string) =>
     err('permission', `Order ${orderId} does not belong to customer ${customerId}.`),
 };
 
@@ -65,15 +65,15 @@ export const orderErrorPatterns = {
 
 export const refundErrorPatterns = {
   // Business: order not in refundable status
-  notDelivered: (orderId, currentStatus) =>
+  notDelivered: (orderId: string, currentStatus: string) =>
     err('business', `Order ${orderId} is "${currentStatus}" — only delivered orders can be refunded.`),
 
   // Business: refund amount exceeds total
-  amountExceedsTotal: (amount, total) =>
+  amountExceedsTotal: (amount: number, total: number) =>
     err('business', `Refund $${amount} exceeds order total $${total}.`),
 
   // Permission: wrong customer
-  ownershipMismatch: (orderId, customerId) =>
+  ownershipMismatch: (orderId: string, customerId: string) =>
     err('permission', `Order ${orderId} does not belong to ${customerId}. Cannot process refund.`),
 };
 

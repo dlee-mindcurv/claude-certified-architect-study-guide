@@ -19,7 +19,12 @@
  * @param {Object} [params.context] - Additional context for recovery
  * @returns {Object} MCP-formatted error response with isError: true
  */
-export function createErrorResponse({ errorCategory, isRetryable, message, context = {} }) {
+export function createErrorResponse({ errorCategory, isRetryable, message, context = {} }: {
+  errorCategory: 'transient' | 'validation' | 'business' | 'permission';
+  isRetryable: boolean;
+  message: string;
+  context?: Record<string, unknown>;
+}) {
   return {
     isError: true,
     content: JSON.stringify({
@@ -36,7 +41,7 @@ export function createErrorResponse({ errorCategory, isRetryable, message, conte
  * @param {Object} data - The response data
  * @returns {Object} MCP-formatted success response
  */
-export function createSuccessResponse(data) {
+export function createSuccessResponse(data: unknown) {
   return {
     content: JSON.stringify(data),
   };

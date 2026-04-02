@@ -30,7 +30,35 @@ const MAX_TURNS = 15;
 // It is rebuilt into the system prompt before each API call, ensuring critical
 // facts are always at the TOP of the context (highest-attention zone).
 
-function createEmptyCaseFacts() {
+interface CaseFactsCustomer {
+  id: string;
+  name: string;
+  email: string;
+  tier: string;
+}
+
+interface CaseFactsOrder {
+  orderId: string;
+  total: number;
+  status: string;
+  deliveredAt: string | null;
+}
+
+interface CaseFactsRefund {
+  refundId: string;
+  amount: number;
+  status: string;
+}
+
+interface CaseFacts {
+  customer: CaseFactsCustomer | null;
+  orders: CaseFactsOrder[];
+  actionsTaken: string[];
+  openIssues: string[];
+  refunds: CaseFactsRefund[];
+}
+
+function createEmptyCaseFacts(): CaseFacts {
   return {
     customer: null,        // { id, name, email, tier }
     orders: [],            // [{ orderId, total, status, deliveredAt }]
@@ -42,8 +70,8 @@ function createEmptyCaseFacts() {
 
 // ─── Case Facts Rendering ─────────────────────────────────────────────────────
 
-function renderCaseFactsBlock(caseFacts) {
-  const lines = ['## Current Case Facts (verified this session)'];
+function renderCaseFactsBlock(caseFacts: CaseFacts): string {
+  const lines: string[] = ['## Current Case Facts (verified this session)'];
 
   if (caseFacts.customer) {
     const c = caseFacts.customer;
@@ -53,7 +81,7 @@ function renderCaseFactsBlock(caseFacts) {
   }
 
   if (caseFacts.orders.length > 0) {
-    const orderSummaries = caseFacts.orders.map(o =>
+    const orderSummaries = caseFacts.orders.map((o: CaseFactsOrder) =>
       `${o.orderId} ($${o.total}, ${o.status}${o.deliveredAt ? `, delivered ${o.deliveredAt}` : ''})`
     );
     lines.push(`- **Orders discussed:** ${orderSummaries.join('; ')}`);
@@ -64,7 +92,7 @@ function renderCaseFactsBlock(caseFacts) {
   }
 
   if (caseFacts.refunds.length > 0) {
-    const refundSummaries = caseFacts.refunds.map(r =>
+    const refundSummaries = caseFacts.refunds.map((r: CaseFactsRefund) =>
       `${r.refundId} ($${r.amount}, ${r.status})`
     );
     lines.push(`- **Refunds:** ${refundSummaries.join('; ')}`);
@@ -83,7 +111,7 @@ function renderCaseFactsBlock(caseFacts) {
 // case facts structure. This happens incrementally so intermediate facts (like
 // customer tier) are available for subsequent decisions.
 
-function extractFactsFromToolResult(toolName, rawResult, caseFacts) {
+function extractFactsFromToolResult(toolName: string, rawResult: { isError: boolean; content: string }, caseFacts: CaseFacts): CaseFacts {
   if (rawResult.isError) {
     caseFacts.actionsTaken.push(
       `${toolName} failed: ${JSON.parse(rawResult.content).message}`
@@ -105,8 +133,8 @@ function extractFactsFromToolResult(toolName, rawResult, caseFacts) {
       break;
 
     case 'lookup_order': {
-      const existing = caseFacts.orders.findIndex(o => o.orderId === data.orderId);
-      const summary = { orderId: data.orderId, total: data.total, status: data.status, deliveredAt: data.deliveredAt || null };
+      const existing = caseFacts.orders.findIndex((o: CaseFactsOrder) => o.orderId === data.orderId);
+      const summary: CaseFactsOrder = { orderId: data.orderId, total: data.total, status: data.status, deliveredAt: data.deliveredAt || null };
       if (existing >= 0) caseFacts.orders[existing] = summary;
       else caseFacts.orders.push(summary);
       caseFacts.actionsTaken.push(`Looked up order ${data.orderId}: $${data.total}, ${data.status}`);
@@ -116,7 +144,7 @@ function extractFactsFromToolResult(toolName, rawResult, caseFacts) {
     case 'process_refund':
       caseFacts.refunds.push({ refundId: data.refundId, amount: data.amount, status: data.status });
       caseFacts.actionsTaken.push(`Processed refund ${data.refundId}: $${data.amount} (${data.status})`);
-      caseFacts.openIssues = caseFacts.openIssues.filter(i => !i.includes('refund'));
+      caseFacts.openIssues = caseFacts.openIssues.filter((i: string) => !i.includes('refund'));
       break;
 
     case 'escalate_to_human':
@@ -133,7 +161,7 @@ function extractFactsFromToolResult(toolName, rawResult, caseFacts) {
 // the fields needed for Claude's next decision. Full data is preserved in the
 // case facts block above.
 
-function trimToolResult(toolName, rawContent) {
+function trimToolResult(toolName: string, rawContent: string): string {
   try {
     const data = JSON.parse(rawContent);
     switch (toolName) {
@@ -155,19 +183,19 @@ function trimToolResult(toolName, rawContent) {
 // EXAM KEY CONCEPT: Case facts go FIRST, before the base system prompt, placing
 // them in the highest-attention zone and countering "lost in the middle."
 
-function buildSystemPromptWithFacts(caseFacts) {
+function buildSystemPromptWithFacts(caseFacts: CaseFacts): string {
   return `${renderCaseFactsBlock(caseFacts)}\n\n---\n\n${csrSystemPrompt}`;
 }
 
 // ─── Agentic Loop with Context Preservation ───────────────────────────────────
 
-async function runAgentWithCaseFacts(userMessage) {
+async function runAgentWithCaseFacts(userMessage: string) {
   console.log('\n' + '='.repeat(60));
   console.log('Task 5.1: Context Preservation with Case Facts Block');
   console.log('='.repeat(60));
   console.log(`\nCustomer: ${userMessage}\n`);
 
-  const messages = [{ role: 'user', content: userMessage }];
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userMessage }];
   const caseFacts = createEmptyCaseFacts();
   let turnCount = 0;
 
@@ -187,12 +215,12 @@ async function runAgentWithCaseFacts(userMessage) {
       model: MODEL,
       max_tokens: 4096,
       system: systemPrompt,
-      tools: csrToolDefinitions,
+      tools: csrToolDefinitions as Anthropic.Messages.Tool[],
       messages,
     });
 
     if (response.stop_reason === 'end_turn') {
-      const finalText = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+      const finalText = response.content.filter((b): b is Anthropic.Messages.TextBlock => b.type === 'text').map(b => b.text).join('\n');
       console.log(`\nAgent: ${finalText}`);
       console.log(`\n--- Completed in ${turnCount} turns ---`);
       console.log('\nFinal Case Facts:');
@@ -203,11 +231,14 @@ async function runAgentWithCaseFacts(userMessage) {
     if (response.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: response.content });
 
-      const toolResults = [];
-      for (const toolUse of response.content.filter(b => b.type === 'tool_use')) {
+      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+      const toolBlocks = response.content.filter(
+        (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use'
+      );
+      for (const toolUse of toolBlocks) {
         console.log(`  Tool: ${toolUse.name}(${JSON.stringify(toolUse.input)})`);
 
-        const rawResult = executeCsrTool(toolUse.name, toolUse.input);
+        const rawResult = executeCsrTool(toolUse.name, toolUse.input as Record<string, unknown>);
 
         // STEP 1: Extract facts into the persistent case facts block
         extractFactsFromToolResult(toolUse.name, rawResult, caseFacts);
@@ -220,7 +251,7 @@ async function runAgentWithCaseFacts(userMessage) {
         console.log(`  Result (trimmed): ${trimmedContent.substring(0, 80)}...`);
 
         toolResults.push({
-          type: 'tool_result',
+          type: 'tool_result' as const,
           tool_use_id: toolUse.id,
           content: trimmedContent,
           ...(rawResult.isError && { is_error: true }),

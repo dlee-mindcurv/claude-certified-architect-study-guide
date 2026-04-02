@@ -57,6 +57,7 @@ async function runPipeline(userMessage: string): Promise<string> {
         'pirate-greeter': pirateGreeterDefinition,
         'pirate-movies-definition': pirateMoviesDefinition
       },
+      permissionMode: "bypassPermissions",
       allowedTools: [],
       maxTurns: 10,
     },

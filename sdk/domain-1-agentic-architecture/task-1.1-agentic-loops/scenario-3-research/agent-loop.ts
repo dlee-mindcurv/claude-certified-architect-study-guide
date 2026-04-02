@@ -40,7 +40,7 @@ Provide a structured research summary with:
 
 // ─── Research Agent via query() ─────────────────────────────────────────────
 
-async function runResearchAgent(researchQuery) {
+async function runResearchAgent(researchQuery: string): Promise<string> {
   console.log('\n' + '='.repeat(60));
   console.log('Research Agent -- Scenario 3 (Agent SDK)');
   console.log('='.repeat(60));

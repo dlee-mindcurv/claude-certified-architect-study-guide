@@ -8,6 +8,7 @@
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { researchServer } from '../../shared/tools/research-tools.js';
 
 // ─── Subagent Definitions (Task 1.2, 1.3, 2.3) ────────────────────────────
@@ -51,17 +52,18 @@ Rules:
 
 // ─── PostToolUse Hook: Log Subagent Results ────────────────────────────────
 
-async function logSubagentHook(input, toolUseID, { signal }) {
+const logSubagentHook: HookCallback = async (_input) => {
+  const input = _input as { hook_event_name: string; tool_name: string; tool_output?: string };
   if (input.hook_event_name === 'PostToolUse' && input.tool_name === 'Agent') {
     const preview = (input.tool_output || '').slice(0, 150);
     console.log(`  [Subagent result] ${preview}...`);
   }
   return {};
-}
+};
 
 // ─── Run Coordinator ───────────────────────────────────────────────────────
 
-async function runResearch(topic) {
+async function runResearch(topic: string) {
   console.log(`\nResearch Topic: ${topic}\n`);
 
   const coordinatorPrompt = `Research the following topic: "${topic}"
@@ -100,7 +102,7 @@ IMPORTANT: Pass explicit context to each subagent — they cannot see your conve
     if (message.type === 'assistant') {
       for (const block of message.message.content) {
         if (block.type === 'tool_use' && block.name === 'Agent') {
-          console.log(`  Invoking subagent: ${block.input?.description?.slice(0, 80)}`);
+          console.log(`  Invoking subagent: ${(block.input as { description?: string })?.description?.slice(0, 80)}`);
         }
       }
     }

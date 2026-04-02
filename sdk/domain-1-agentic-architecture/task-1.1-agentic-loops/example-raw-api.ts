@@ -15,7 +15,7 @@
 
 import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
-import {csrToolDefinitions, executeCsrTool, executeCsrToolRaw} from '../../../shared/tools/csr-tools.js';
+import {csrToolDefinitions, executeCsrToolRaw} from '../../../shared/tools/csr-tools.js';
 import { csrSystemPrompt } from '../../../shared/prompts/csr-system-prompt.js';
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -35,13 +35,13 @@ const MAX_TURNS = 15;
 
 // ─── The Agentic Loop ───────────────────────────────────────────────────────
 
-async function runAgentLoop(userMessage) {
+async function runAgentLoop(userMessage: string): Promise<string | undefined> {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`User: ${userMessage}`);
   console.log('='.repeat(60));
 
   // Initialize the conversation with the user's message
-  const messages = [
+  const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: userMessage }
   ];
 
@@ -68,7 +68,7 @@ async function runAgentLoop(userMessage) {
       model: MODEL,
       max_tokens: 4096,
       system: csrSystemPrompt,
-      tools: csrToolDefinitions,
+      tools: csrToolDefinitions as Anthropic.Messages.Tool[],
       messages,
     });
 
@@ -88,7 +88,9 @@ async function runAgentLoop(userMessage) {
 
     if (response.stop_reason === 'end_turn') {
       // ── EXIT: Claude has completed its response ─────────────────────
-      const textBlocks = response.content.filter(b => b.type === 'text');
+      const textBlocks = response.content.filter(
+        (b): b is Anthropic.Messages.TextBlock => b.type === 'text'
+      );
       const finalText = textBlocks.map(b => b.text).join('\n');
       console.log(`\nAgent: ${finalText}`);
       return finalText;
@@ -101,8 +103,10 @@ async function runAgentLoop(userMessage) {
       messages.push({ role: 'assistant', content: response.content });
 
       // Step 2: Execute each tool call and collect results
-      const toolResults = [];
-      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+      const toolUseBlocks = response.content.filter(
+        (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use'
+      );
 
       // if the stop reason is "tool_use", then toolUseBlocks will be non-empty and you can look through each
       for (const toolUse of toolUseBlocks) {
@@ -112,7 +116,7 @@ async function runAgentLoop(userMessage) {
         console.log(`  Tool call: ${toolUse.name}(${JSON.stringify(toolUse.input)})`);
 
         // Execute the tool using our mock backend
-        const result = executeCsrToolRaw(toolUse.name, toolUse.input);
+        const result = executeCsrToolRaw(toolUse.name, toolUse.input as Record<string, unknown>);
 
         console.log(`  Result: ${result.content.substring(0, 100)}...`);
 

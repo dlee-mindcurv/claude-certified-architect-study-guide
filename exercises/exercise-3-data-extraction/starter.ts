@@ -49,7 +49,7 @@ const extractionTool = {
 
 // ─── Step 2: Extract with forced tool_use ──────────────────────────────────
 
-async function extractDocument(documentId) {
+async function extractDocument(documentId: string) {
   const doc = getDocument(documentId);
   if (!doc) throw new Error(`Document not found: ${documentId}`);
 
@@ -72,8 +72,8 @@ async function extractDocument(documentId) {
 // EXAM KEY CONCEPT (Task 4.4): Validate output, feed errors back, retry.
 // But only retry if the error is fixable — missing source data is NOT retryable.
 
-function validateExtraction(extraction) {
-  const errors = [];
+function validateExtraction(extraction: Record<string, unknown>) {
+  const errors: string[] = [];
 
   // TODO 3: Add validation rules:
   // - confidence must be between 0 and 1
@@ -84,7 +84,7 @@ function validateExtraction(extraction) {
   return errors; // empty = valid
 }
 
-async function extractWithRetry(documentId) {
+async function extractWithRetry(documentId: string) {
   let lastErrors = [];
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -111,7 +111,7 @@ async function extractWithRetry(documentId) {
 //
 // EXAM KEY CONCEPT (Task 5.5): Route low-confidence extractions to humans.
 
-function routeByConfidence(extraction) {
+function routeByConfidence(extraction: Record<string, unknown>) {
   // TODO 5: Check extraction.confidence against CONFIDENCE_THRESHOLD
   // Return { route: 'auto' | 'human_review', reason: '...' }
 
@@ -128,7 +128,7 @@ async function main() {
   for (const id of docIds) {
     console.log(`\nProcessing: ${id}`);
     const { extraction, attempts, failed } = await extractWithRetry(id);
-    if (failed) {
+    if (failed || !extraction) {
       console.log(`  FAILED after ${attempts} attempts`);
     } else {
       const routing = routeByConfidence(extraction);

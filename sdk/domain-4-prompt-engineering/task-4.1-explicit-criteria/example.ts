@@ -81,7 +81,7 @@ ${sampleCode}
 
 // ─── Run Both Approaches via Agent SDK query() ─────────────────────────────
 
-async function runReview(label, prompt) {
+async function runReview(label: string, prompt: string) {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`Review approach: ${label}`);
   console.log('='.repeat(60));

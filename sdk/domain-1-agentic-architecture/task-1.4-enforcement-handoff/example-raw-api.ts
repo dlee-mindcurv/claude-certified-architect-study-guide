@@ -37,8 +37,8 @@ const PREREQUISITES = {
 // EXAM CONCEPT: This function is the programmatic gate.
 // It runs BEFORE every tool execution and can block the call.
 
-function checkPrerequisites(toolName, completedTools) {
-  const required = PREREQUISITES[toolName];
+function checkPrerequisites(toolName: string, completedTools: Set<string>): { allowed: boolean; missing?: string[]; message?: string } {
+  const required = PREREQUISITES[toolName as keyof typeof PREREQUISITES];
   if (!required) return { allowed: true };
 
   const missing = required.filter(req => !completedTools.has(req));
@@ -57,18 +57,18 @@ function checkPrerequisites(toolName, completedTools) {
 
 // ─── Agentic Loop with Inline Enforcement ───────────────────────────────────
 
-async function runEnforcedAgentRawApi(userMessage) {
+async function runEnforcedAgentRawApi(userMessage: string) {
   console.log('\n' + '='.repeat(60));
   console.log('CSR Agent — Raw API with Prerequisite Gates');
   console.log('='.repeat(60));
   console.log(`\nCustomer: ${userMessage}\n`);
 
-  const messages = [{ role: 'user', content: userMessage }];
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userMessage }];
 
   // Enforcement state
-  const completedTools = new Set();
-  const toolCallLog = [];
-  let verifiedCustomerId = null;
+  const completedTools = new Set<string>();
+  const toolCallLog: { tool: string; blocked: boolean; reason?: string; isError?: boolean; timestamp: string }[] = [];
+  let verifiedCustomerId: string | null = null;
   let turnCount = 0;
 
   while (true) {
@@ -83,13 +83,13 @@ async function runEnforcedAgentRawApi(userMessage) {
       model: MODEL,
       max_tokens: 4096,
       system: csrSystemPrompt,
-      tools: csrToolDefinitions,
+      tools: csrToolDefinitions as Anthropic.Messages.Tool[],
       messages,
     });
 
     if (response.stop_reason === 'end_turn') {
       const text = response.content
-        .filter(b => b.type === 'text')
+        .filter((b): b is Anthropic.Messages.TextBlock => b.type === 'text')
         .map(b => b.text)
         .join('\n');
 
@@ -109,9 +109,9 @@ async function runEnforcedAgentRawApi(userMessage) {
 
     if (response.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: response.content });
-      const toolResults = [];
+      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
 
-      for (const block of response.content.filter(b => b.type === 'tool_use')) {
+      for (const block of response.content.filter((b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use')) {
 
         // ────────────────────────────────────────────────────────────────
         // PROGRAMMATIC ENFORCEMENT (inline in the loop)
@@ -127,7 +127,7 @@ async function runEnforcedAgentRawApi(userMessage) {
           // ── GATE BLOCKED ────────────────────────────────────────────
           // Return an error to Claude instead of executing the tool.
           // Claude will see the error and adjust its behavior.
-          console.log(`  GATE BLOCKED: ${block.name} (missing: ${prereqCheck.missing.join(', ')})`);
+          console.log(`  GATE BLOCKED: ${block.name} (missing: ${prereqCheck.missing!.join(', ')})`);
 
           toolCallLog.push({
             tool: block.name,
@@ -141,7 +141,7 @@ async function runEnforcedAgentRawApi(userMessage) {
             tool_use_id: block.id,
             content: JSON.stringify({
               error: prereqCheck.message,
-              missingPrerequisites: prereqCheck.missing,
+              missingPrerequisites: prereqCheck.missing!,
               instruction: 'Please complete the missing steps first, then retry this action.',
             }),
             is_error: true,
@@ -151,7 +151,7 @@ async function runEnforcedAgentRawApi(userMessage) {
 
         // ── GATE PASSED — Execute the tool ────────────────────────────
         console.log(`  Executing: ${block.name}(${JSON.stringify(block.input)})`);
-        const result = executeCsrTool(block.name, block.input);
+        const result = executeCsrTool(block.name, block.input as Record<string, unknown>);
 
         // Track successful calls for prerequisite state
         if (!result.isError) {

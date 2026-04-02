@@ -33,35 +33,35 @@ const SCRATCHPAD_PATH = join(SCRATCHPAD_DIR, 'scratchpad.md');
 // This file survives context compaction because it exists outside the
 // conversation history. The agent can read it back after /compact.
 
-const writeScratchpadTool = tool({
-  name: 'write_scratchpad',
-  description: 'Write findings to the persistent scratchpad file. Use this to record key discoveries that must survive context compaction. The scratchpad persists on disk.',
-  schema: z.object({
+const writeScratchpadTool = tool(
+  'write_scratchpad',
+  'Write findings to the persistent scratchpad file. Use this to record key discoveries that must survive context compaction. The scratchpad persists on disk.',
+  {
     section: z.string().describe('Section header (e.g., "Architecture", "Callers", "Test Coverage")'),
     content: z.string().describe('Structured findings to record under this section'),
-  }),
-  run: async ({ section, content }) => {
+  },
+  async ({ section, content }) => {
     if (!existsSync(SCRATCHPAD_DIR)) mkdirSync(SCRATCHPAD_DIR, { recursive: true });
 
     const entry = `\n## ${section}\nUpdated: ${new Date().toISOString()}\n\n${content}\n\n---\n`;
     const existing = existsSync(SCRATCHPAD_PATH) ? readFileSync(SCRATCHPAD_PATH, 'utf-8') : '# Investigation Scratchpad\n';
     writeFileSync(SCRATCHPAD_PATH, existing + entry, 'utf-8');
 
-    return `Written to scratchpad: ${section} (${content.length} chars)`;
+    return { content: [{ type: 'text' as const, text: `Written to scratchpad: ${section} (${content.length} chars)` }] };
   },
-});
+);
 
-const readScratchpadTool = tool({
-  name: 'read_scratchpad',
-  description: 'Read the persistent scratchpad file to recover findings from previous investigation phases. Use this after context compaction or session restart.',
-  schema: z.object({}),
-  run: async () => {
+const readScratchpadTool = tool(
+  'read_scratchpad',
+  'Read the persistent scratchpad file to recover findings from previous investigation phases. Use this after context compaction or session restart.',
+  {},
+  async () => {
     if (!existsSync(SCRATCHPAD_PATH)) {
-      return 'Scratchpad is empty. No previous findings recorded.';
+      return { content: [{ type: 'text' as const, text: 'Scratchpad is empty. No previous findings recorded.' }] };
     }
-    return readFileSync(SCRATCHPAD_PATH, 'utf-8');
+    return { content: [{ type: 'text' as const, text: readFileSync(SCRATCHPAD_PATH, 'utf-8') }] };
   },
-});
+);
 
 // Bundle tools into an MCP server
 const scratchpadServer = createSdkMcpServer({
@@ -74,7 +74,7 @@ const scratchpadServer = createSdkMcpServer({
 // EXAM KEY CONCEPT: Each subagent gets a FOCUSED context (only relevant files)
 // and returns a STRUCTURED SUMMARY. The main agent's context stays clean.
 
-async function investigateWithSubagent(question, context) {
+async function investigateWithSubagent(question: string, context: string): Promise<string> {
   console.log(`\n  [Subagent] Investigating: "${question}"`);
 
   let result = '';

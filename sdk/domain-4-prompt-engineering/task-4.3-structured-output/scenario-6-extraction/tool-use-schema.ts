@@ -25,6 +25,30 @@ import {
   getDocument,
 } from '../../../../shared/tools/extraction-tools.js';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface DocumentMetadata {
+  document_type: string;
+  confidence: number;
+  title?: string | null;
+  error?: string;
+  [key: string]: unknown;
+}
+
+interface ExtractionResult {
+  document_id?: string;
+  document_type?: string;
+  field_confidence?: Record<string, number>;
+  monetary_values?: Array<{
+    label: string;
+    stated_value?: number;
+    calculated_value?: number;
+    conflict_detected?: boolean;
+  }>;
+  error?: string;
+  [key: string]: unknown;
+}
+
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 const client = new Anthropic();
@@ -46,10 +70,10 @@ const MODEL = 'claude-sonnet-4-20250514';
  * Phase 1: Extract document metadata (type, title, date).
  * Uses forced tool selection to guarantee structured output.
  */
-async function extractMetadata(documentId) {
+async function extractMetadata(documentId: string): Promise<DocumentMetadata> {
   const doc = getDocument(documentId);
   if (!doc) {
-    return { error: `Document not found: ${documentId}` };
+    return { document_type: 'unknown', confidence: 0, error: `Document not found: ${documentId}` };
   }
 
   const metadataTool = {
@@ -81,8 +105,8 @@ async function extractMetadata(documentId) {
     model: MODEL,
     max_tokens: 1024,
     // ── FORCED TOOL SELECTION ─────────────────────────────────────────
-    tools: [metadataTool],
-    tool_choice: { type: 'tool', name: 'classify_document' },
+    tools: [metadataTool as Anthropic.Tool],
+    tool_choice: { type: 'tool' as const, name: 'classify_document' },
     messages: [
       {
         role: 'user',
@@ -91,15 +115,15 @@ async function extractMetadata(documentId) {
     ],
   });
 
-  const toolUse = response.content.find(b => b.type === 'tool_use');
-  return toolUse ? toolUse.input : { error: 'No tool_use in response' };
+  const toolUse = response.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+  return toolUse ? (toolUse.input as DocumentMetadata) : { document_type: 'unknown', confidence: 0, error: 'No tool_use in response' };
 }
 
 /**
  * Phase 2: Detailed extraction using the full schema.
  * Uses the document type from Phase 1 to guide extraction.
  */
-async function extractDetails(documentId, metadata) {
+async function extractDetails(documentId: string, metadata: DocumentMetadata): Promise<ExtractionResult> {
   const doc = getDocument(documentId);
   if (!doc) {
     return { error: `Document not found: ${documentId}` };
@@ -108,8 +132,8 @@ async function extractDetails(documentId, metadata) {
   const response = await client.messages.create({
     model: MODEL,
     max_tokens: 2048,
-    tools: [documentExtractionTool],
-    tool_choice: { type: 'tool', name: 'extract_document_info' },
+    tools: [documentExtractionTool as Anthropic.Tool],
+    tool_choice: { type: 'tool' as const, name: 'extract_document_info' },
     messages: [
       {
         role: 'user',
@@ -130,14 +154,14 @@ Rules:
     ],
   });
 
-  const toolUse = response.content.find(b => b.type === 'tool_use');
-  return toolUse ? toolUse.input : { error: 'No tool_use in response' };
+  const toolUse = response.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+  return toolUse ? (toolUse.input as ExtractionResult) : { error: 'No tool_use in response' };
 }
 
 // ─── Validation ─────────────────────────────────────────────────────────────
 
-function validateExtraction(extraction) {
-  const errors = [];
+function validateExtraction(extraction: ExtractionResult) {
+  const errors: string[] = [];
 
   if (!extraction.document_id) errors.push('Missing document_id');
   if (!extraction.document_type) errors.push('Missing document_type');

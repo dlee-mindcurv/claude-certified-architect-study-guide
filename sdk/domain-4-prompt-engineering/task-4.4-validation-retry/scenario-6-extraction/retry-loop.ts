@@ -17,6 +17,62 @@ import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../../shared/schemas/extraction-output.js';
 import { getDocumentIds, getDocument } from '../../../../shared/tools/extraction-tools.js';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface Extraction {
+  document_id?: string;
+  document_type?: string;
+  date?: string | null;
+  field_confidence?: Record<string, number>;
+  entities?: Array<{ name: string; role: string; [key: string]: unknown }>;
+  monetary_values?: Array<{
+    label: string;
+    stated_value?: number | null;
+    calculated_value?: number | null;
+    conflict_detected?: boolean;
+  }>;
+  key_dates?: Array<{ label: string; date: string }>;
+  [key: string]: unknown;
+}
+
+interface ValidationError {
+  rule: string;
+  message: string;
+  errorType: string;
+  pattern: string;
+}
+
+interface ValidationRule {
+  name: string;
+  check: (e: Extraction) => boolean;
+  errorMessage: string | ((e: Extraction) => string);
+  errorType: string;
+  pattern: string;
+}
+
+interface ExtractionResult {
+  extraction: Extraction | null;
+  status: string;
+  attempts?: number;
+  errorLog?: Array<ValidationError & { attempt: number }>;
+  error?: string;
+  nonRetryableErrors?: ValidationError[];
+}
+
+interface ErrorLogEntry {
+  documentId: string;
+  errorLog: Array<ValidationError & { attempt: number }>;
+  attempts: number;
+  status: string;
+}
+
+interface PatternAnalysisStats {
+  total: number;
+  resolved_by_retry: number;
+  unresolvable: number;
+  documents: Set<string>;
+}
+
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 const client = new Anthropic();
@@ -25,53 +81,53 @@ const MAX_RETRIES = 2;
 
 // ─── Validation Rules ───────────────────────────────────────────────────────
 
-const VALIDATION_RULES = [
+const VALIDATION_RULES: ValidationRule[] = [
   {
     name: 'required-document-id',
-    check: (e) => !!e.document_id,
+    check: (e: Extraction) => !!e.document_id,
     errorMessage: 'document_id is required',
     errorType: 'retryable',
     pattern: 'missing-required-field',
   },
   {
     name: 'required-document-type',
-    check: (e) => !!e.document_type,
+    check: (e: Extraction) => !!e.document_type,
     errorMessage: 'document_type is required',
     errorType: 'retryable',
     pattern: 'missing-required-field',
   },
   {
     name: 'required-field-confidence',
-    check: (e) => !!e.field_confidence && typeof e.field_confidence === 'object',
+    check: (e: Extraction) => !!e.field_confidence && typeof e.field_confidence === 'object',
     errorMessage: 'field_confidence object is required',
     errorType: 'retryable',
     pattern: 'missing-required-field',
   },
   {
     name: 'valid-date-format',
-    check: (e) => {
+    check: (e: Extraction) => {
       if (e.date === null || e.date === undefined) return true;
       return /^\d{4}(-\d{2}(-\d{2})?)?$/.test(e.date);
     },
-    errorMessage: (e) => `date "${e.date}" is not ISO 8601 (YYYY, YYYY-MM, or YYYY-MM-DD)`,
+    errorMessage: (e: Extraction) => `date "${e.date}" is not ISO 8601 (YYYY, YYYY-MM, or YYYY-MM-DD)`,
     errorType: 'retryable',
     pattern: 'date-format-mismatch',
   },
   {
     name: 'valid-document-type-enum',
-    check: (e) => {
+    check: (e: Extraction) => {
       const valid = ['invoice', 'contract', 'research_paper', 'receipt', 'letter', 'report', 'other'];
-      return valid.includes(e.document_type);
+      return valid.includes(e.document_type!);
     },
-    errorMessage: (e) => `document_type "${e.document_type}" not in enum`,
+    errorMessage: (e: Extraction) => `document_type "${e.document_type}" not in enum`,
     errorType: 'retryable',
     pattern: 'enum-violation',
   },
   {
     name: 'valid-confidence-range',
-    check: (e) => {
+    check: (e: Extraction) => {
       if (!e.field_confidence) return true;
-      return Object.values(e.field_confidence).every(v => typeof v === 'number' && v >= 0 && v <= 1);
+      return Object.values(e.field_confidence).every((v: number) => typeof v === 'number' && v >= 0 && v <= 1);
     },
     errorMessage: 'All confidence scores must be numbers between 0 and 1',
     errorType: 'retryable',
@@ -79,15 +135,15 @@ const VALIDATION_RULES = [
   },
   {
     name: 'valid-entity-roles',
-    check: (e) => {
+    check: (e: Extraction) => {
       if (!e.entities || e.entities.length === 0) return true;
       const validRoles = ['vendor', 'client', 'author', 'recipient', 'party', 'other'];
-      return e.entities.every(ent => validRoles.includes(ent.role));
+      return e.entities.every((ent) => validRoles.includes(ent.role));
     },
-    errorMessage: (e) => {
+    errorMessage: (e: Extraction) => {
       const invalidRoles = (e.entities || [])
-        .filter(ent => !['vendor', 'client', 'author', 'recipient', 'party', 'other'].includes(ent.role))
-        .map(ent => `"${ent.role}"`);
+        .filter((ent) => !['vendor', 'client', 'author', 'recipient', 'party', 'other'].includes(ent.role))
+        .map((ent) => `"${ent.role}"`);
       return `Invalid entity roles: ${invalidRoles.join(', ')}`;
     },
     errorType: 'retryable',
@@ -95,7 +151,7 @@ const VALIDATION_RULES = [
   },
   {
     name: 'conflict-detection-consistency',
-    check: (e) => {
+    check: (e: Extraction) => {
       if (!e.monetary_values) return true;
       for (const mv of e.monetary_values) {
         if (mv.stated_value != null && mv.calculated_value != null) {
@@ -112,9 +168,9 @@ const VALIDATION_RULES = [
   },
   {
     name: 'valid-key-dates-format',
-    check: (e) => {
+    check: (e: Extraction) => {
       if (!e.key_dates) return true;
-      return e.key_dates.every(kd => kd.label && kd.date);
+      return e.key_dates.every((kd) => kd.label && kd.date);
     },
     errorMessage: 'Each key_date must have a label and date',
     errorType: 'retryable',
@@ -124,8 +180,8 @@ const VALIDATION_RULES = [
 
 // ─── Validation Engine ──────────────────────────────────────────────────────
 
-function validate(extraction) {
-  const errors = [];
+function validate(extraction: Extraction) {
+  const errors: ValidationError[] = [];
   for (const rule of VALIDATION_RULES) {
     try {
       if (!rule.check(extraction)) {
@@ -142,7 +198,7 @@ function validate(extraction) {
     } catch (err) {
       errors.push({
         rule: rule.name,
-        message: `Validation error: ${err.message}`,
+        message: `Validation error: ${(err as Error).message}`,
         errorType: 'retryable',
         pattern: 'validation-exception',
       });
@@ -159,7 +215,7 @@ function validate(extraction) {
 
 // ─── Extraction with Retry ──────────────────────────────────────────────────
 
-async function extractWithRetry(documentId) {
+async function extractWithRetry(documentId: string): Promise<ExtractionResult> {
   const doc = getDocument(documentId);
   if (!doc) {
     return { extraction: null, status: 'error', error: `Document not found: ${documentId}` };
@@ -169,10 +225,10 @@ async function extractWithRetry(documentId) {
   console.log(`Extracting: ${documentId} (type hint: ${doc.type})`);
   console.log('━'.repeat(50));
 
-  const errorLog = [];
+  const errorLog: Array<ValidationError & { attempt: number }> = [];
   let attempt = 0;
 
-  const messages = [
+  const messages: Anthropic.MessageParam[] = [
     {
       role: 'user',
       content: `Extract structured information from this document. The document_id is "${documentId}".
@@ -196,18 +252,18 @@ ${doc.raw}`,
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: 2048,
-      tools: [documentExtractionTool],
-      tool_choice: { type: 'tool', name: 'extract_document_info' },
+      tools: [documentExtractionTool as Anthropic.Tool],
+      tool_choice: { type: 'tool' as const, name: 'extract_document_info' },
       messages,
     });
 
-    const toolUse = response.content.find(b => b.type === 'tool_use');
+    const toolUse = response.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
     if (!toolUse) {
       console.log('  ERROR: No tool_use block');
       return { extraction: null, status: 'error', attempts: attempt, errorLog };
     }
 
-    const extraction = toolUse.input;
+    const extraction = toolUse.input as Extraction;
     console.log(`  type: ${extraction.document_type}, date: ${extraction.date}`);
 
     const result = validate(extraction);
@@ -243,9 +299,9 @@ ${doc.raw}`,
       .map(e => `- ${e.message}`)
       .join('\n');
 
-    messages.push({ role: 'assistant', content: response.content });
+    messages.push({ role: 'assistant' as const, content: response.content as Anthropic.ContentBlockParam[] });
     messages.push({
-      role: 'user',
+      role: 'user' as const,
       content: `Your extraction has validation errors. Fix these specific issues:
 
 ${errorFeedback}
@@ -255,12 +311,13 @@ Re-extract using the extract_document_info tool with corrections.`,
 
     console.log('  Retrying with error feedback...');
   }
+  return { extraction: null, status: 'error', attempts: attempt, errorLog };
 }
 
 // ─── Error Pattern Analyzer ─────────────────────────────────────────────────
 
-function analyzePatterns(allErrorLogs) {
-  const stats = {};
+function analyzePatterns(allErrorLogs: ErrorLogEntry[]) {
+  const stats: Record<string, PatternAnalysisStats> = {};
 
   for (const { documentId, errorLog, attempts, status } of allErrorLogs) {
     for (const err of errorLog) {
@@ -283,7 +340,7 @@ function analyzePatterns(allErrorLogs) {
     }
   }
 
-  const result = {};
+  const result: Record<string, Record<string, unknown>> = {};
   for (const [pattern, data] of Object.entries(stats)) {
     result[pattern] = {
       total_occurrences: data.total,
@@ -308,7 +365,7 @@ async function main() {
   console.log('Task 4.4 / Scenario 6 -- Full Extraction Retry Pipeline\n');
 
   const documentIds = getDocumentIds();
-  const allResults = [];
+  const allResults: Array<ExtractionResult & { documentId: string }> = [];
 
   for (const docId of documentIds) {
     const result = await extractWithRetry(docId);
@@ -332,12 +389,12 @@ async function main() {
   }
 
   // ── Pattern Analysis ──────────────────────────────────────────────
-  const allErrorLogs = allResults
+  const allErrorLogs: ErrorLogEntry[] = allResults
     .filter(r => r.errorLog && r.errorLog.length > 0)
     .map(r => ({
       documentId: r.documentId,
-      errorLog: r.errorLog,
-      attempts: r.attempts,
+      errorLog: r.errorLog!,
+      attempts: r.attempts!,
       status: r.status,
     }));
 

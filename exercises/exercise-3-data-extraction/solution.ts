@@ -48,7 +48,7 @@ const extractionTool = {
 
 // ─── Extract with forced tool_use ──────────────────────────────────────────
 
-async function extractDocument(documentId, errorFeedback = null) {
+async function extractDocument(documentId: string, errorFeedback: string | null = null) {
   const doc = getDocument(documentId);
   if (!doc) throw new Error(`Document not found: ${documentId}`);
 
@@ -60,19 +60,19 @@ async function extractDocument(documentId, errorFeedback = null) {
   const response = await client.messages.create({
     model: MODEL,
     max_tokens: 4096,
-    tools: [extractionTool],
-    tool_choice: { type: 'tool', name: 'extract_document' },
-    messages: [{ role: 'user', content: prompt }],
+    tools: [extractionTool] as Anthropic.Messages.Tool[],
+    tool_choice: { type: 'tool' as const, name: 'extract_document' },
+    messages: [{ role: 'user' as const, content: prompt }],
   });
 
-  const toolUse = response.content.find(b => b.type === 'tool_use');
-  return toolUse.input;
+  const toolUse = response.content.find((b: Anthropic.Messages.ContentBlock) => b.type === 'tool_use');
+  return toolUse && 'input' in toolUse ? toolUse.input as Record<string, unknown> : {};
 }
 
 // ─── Validation ────────────────────────────────────────────────────────────
 
-function validateExtraction(extraction) {
-  const errors = [];
+function validateExtraction(extraction: Record<string, unknown>) {
+  const errors: string[] = [];
 
   if (typeof extraction.confidence !== 'number' || extraction.confidence < 0 || extraction.confidence > 1) {
     errors.push('confidence must be between 0 and 1');
@@ -80,10 +80,10 @@ function validateExtraction(extraction) {
   if (extraction.document_type === 'other' && !extraction.document_type_detail) {
     errors.push('document_type "other" requires document_type_detail');
   }
-  if (extraction.date && !/^\d{4}-\d{2}-\d{2}/.test(extraction.date)) {
+  if (extraction.date && typeof extraction.date === 'string' && !/^\d{4}-\d{2}-\d{2}/.test(extraction.date)) {
     errors.push('date should be ISO 8601 format');
   }
-  if (!extraction.key_data_points || extraction.key_data_points.length === 0) {
+  if (!extraction.key_data_points || (extraction.key_data_points as unknown[]).length === 0) {
     errors.push('key_data_points must have at least 1 item');
   }
 
@@ -92,8 +92,8 @@ function validateExtraction(extraction) {
 
 // ─── Validation-Retry Loop (Task 4.4) ──────────────────────────────────────
 
-async function extractWithRetry(documentId) {
-  let lastErrors = [];
+async function extractWithRetry(documentId: string) {
+  let lastErrors: string[] = [];
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`  Attempt ${attempt}/${MAX_RETRIES}...`);
@@ -116,11 +116,12 @@ async function extractWithRetry(documentId) {
 
 // ─── Confidence Routing (Task 5.5) ─────────────────────────────────────────
 
-function routeByConfidence(extraction) {
-  if (extraction.confidence >= CONFIDENCE_THRESHOLD) {
-    return { route: 'auto', reason: `confidence ${extraction.confidence} >= ${CONFIDENCE_THRESHOLD}` };
+function routeByConfidence(extraction: Record<string, unknown>) {
+  const confidence = extraction.confidence as number;
+  if (confidence >= CONFIDENCE_THRESHOLD) {
+    return { route: 'auto', reason: `confidence ${confidence} >= ${CONFIDENCE_THRESHOLD}` };
   }
-  return { route: 'human_review', reason: `confidence ${extraction.confidence} < ${CONFIDENCE_THRESHOLD}` };
+  return { route: 'human_review', reason: `confidence ${confidence} < ${CONFIDENCE_THRESHOLD}` };
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────
@@ -128,20 +129,20 @@ function routeByConfidence(extraction) {
 async function main() {
   console.log('Exercise 3 — SOLUTION: Structured Data Extraction Pipeline\n');
 
-  const results = { auto: [], human_review: [], failed: [] };
+  const results: Record<string, Array<string | { id: string; extraction: Record<string, unknown> }>> = { auto: [], human_review: [], failed: [] };
 
   for (const id of getDocumentIds()) {
     console.log(`\nProcessing: ${id}`);
     const { extraction, attempts, failed } = await extractWithRetry(id);
 
-    if (failed) {
+    if (failed || !extraction) {
       console.log(`  FAILED after ${attempts} attempts`);
       results.failed.push(id);
     } else {
       const routing = routeByConfidence(extraction);
       console.log(`  Route: ${routing.route} (${routing.reason})`);
-      console.log(`  Type: ${extraction.document_type}, Points: ${extraction.key_data_points.length}`);
-      results[routing.route].push({ id, extraction });
+      console.log(`  Type: ${extraction.document_type}, Points: ${(extraction.key_data_points as unknown[])?.length ?? 0}`);
+      results[routing.route]!.push({ id, extraction });
     }
   }
 

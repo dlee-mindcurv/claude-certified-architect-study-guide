@@ -23,11 +23,38 @@ import { researchServer } from '../../../../shared/tools/research-tools.js';
 
 // ─── Data Structures ─────────────────────────────────────────────────────────
 
+interface ClaimSource {
+  url: string;
+  name: string;
+  publicationDate: string;
+  page: number | null;
+}
+
+interface Claim {
+  claim: string;
+  evidence: string;
+  source: ClaimSource;
+  confidence: string;
+  methodology: string | null;
+  id: string;
+}
+
+interface ClaimInput {
+  claim: string;
+  evidence: string;
+  sourceUrl: string;
+  sourceName: string;
+  publicationDate: string;
+  confidence: string;
+  page?: number | null;
+  methodology?: string | null;
+}
+
 /**
  * EXAM KEY CONCEPT: This is the atomic unit of provenance tracking.
  * Every factual assertion carries its source metadata.
  */
-export function createClaim({ claim, evidence, sourceUrl, sourceName, publicationDate, confidence, page = null, methodology = null }) {
+export function createClaim({ claim, evidence, sourceUrl, sourceName, publicationDate, confidence, page = null, methodology = null }: ClaimInput): Claim {
   return Object.freeze({
     claim, evidence,
     source: Object.freeze({ url: sourceUrl, name: sourceName, publicationDate, page }),
@@ -36,7 +63,16 @@ export function createClaim({ claim, evidence, sourceUrl, sourceName, publicatio
   });
 }
 
-export function createFindings({ topic, findings, gaps = [], subagentId }) {
+interface Findings {
+  topic: string;
+  findings: Claim[];
+  gaps: string[];
+  subagentId: string;
+  collectedAt: string;
+  findingCount: number;
+}
+
+export function createFindings({ topic, findings, gaps = [], subagentId }: { topic: string; findings: Claim[]; gaps?: string[]; subagentId: string }): Findings {
   return { topic, findings, gaps, subagentId, collectedAt: new Date().toISOString(), findingCount: findings.length };
 }
 
@@ -45,8 +81,24 @@ export function createFindings({ topic, findings, gaps = [], subagentId }) {
 // EXAM KEY CONCEPT: Conflicts are detected automatically by comparing claims
 // from different sources. When detected, BOTH values are preserved.
 
-export function detectConflicts(allFindings) {
-  const conflicts = [];
+interface ConflictSide {
+  value: string;
+  fullClaim: string;
+  source: ClaimSource;
+  evidence: string;
+}
+
+interface Conflict {
+  id: string;
+  metric: string;
+  claimA: ConflictSide;
+  claimB: ConflictSide;
+  explanation: string;
+  resolution: string;
+}
+
+export function detectConflicts(allFindings: Findings[]): Conflict[] {
+  const conflicts: Conflict[] = [];
   const allClaims = allFindings.flatMap(f => f.findings);
 
   const numericClaims = allClaims
@@ -73,15 +125,15 @@ export function detectConflicts(allFindings) {
   return deduplicateConflicts(conflicts);
 }
 
-function extractNumbers(text) {
+function extractNumbers(text: string): string[] {
   return text.match(/(\d+\.?\d*%|\$[\d,.]+[MBK]?|\d{2,})/g) || [];
 }
 
-function extractKeywords(text) {
+function extractKeywords(text: string): string[] {
   return text.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w.length > 3);
 }
 
-function createConflict(claimA, claimB, sharedKeywords) {
+function createConflict(claimA: Claim, claimB: Claim, sharedKeywords: string[]): Conflict {
   return {
     id: `conflict-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     metric: sharedKeywords.slice(0, 5).join(' '),
@@ -92,8 +144,8 @@ function createConflict(claimA, claimB, sharedKeywords) {
   };
 }
 
-function inferConflictExplanation(claimA, claimB) {
-  const explanations = [];
+function inferConflictExplanation(claimA: Claim, claimB: Claim): string {
+  const explanations: string[] = [];
   if (claimA.evidence !== claimB.evidence) {
     explanations.push(`Different methodologies: "${claimA.evidence}" vs "${claimB.evidence}"`);
   }
@@ -105,8 +157,8 @@ function inferConflictExplanation(claimA, claimB) {
   return explanations.length > 0 ? explanations.join('. ') : 'Reason not determined from available metadata.';
 }
 
-function deduplicateConflicts(conflicts) {
-  const seen = new Set();
+function deduplicateConflicts(conflicts: Conflict[]): Conflict[] {
+  const seen = new Set<string>();
   return conflicts.filter(c => {
     const key = [c.claimA.value, c.claimB.value].sort().join('|');
     if (seen.has(key)) return false;
@@ -115,19 +167,68 @@ function deduplicateConflicts(conflicts) {
   });
 }
 
-// ─── Provenance-Preserving Synthesis ────��────────────────────────────────────
+// ─── Provenance-Preserving Synthesis ─────────────────────────────────────────
+
+interface SynthesizedFinding {
+  claim: string;
+  source: string;
+  sourceUrl: string;
+  publicationDate: string;
+  page: number | null;
+  confidence: string;
+  evidence: string;
+}
+
+interface SynthesizedConflictValue {
+  value: string;
+  source: string;
+  publishedDate: string;
+  claim: string;
+  evidence: string;
+}
+
+interface SynthesizedConflict {
+  metric: string;
+  values: SynthesizedConflictValue[];
+  explanation: string;
+  resolution: string;
+}
+
+interface CoverageEntry {
+  topic: string;
+  level: string;
+  sourceCount: number;
+  claimCount: number;
+  gaps: string[];
+}
+
+interface SourceEntry {
+  name: string;
+  url: string;
+  publicationDate: string;
+}
+
+interface SynthesizedReport {
+  title: string;
+  generatedAt: string;
+  statistics: { totalClaims: number; totalSources: number; conflictsDetected: number };
+  findings: SynthesizedFinding[];
+  conflicts: SynthesizedConflict[];
+  coverage: CoverageEntry[];
+  sources: SourceEntry[];
+}
 
 /**
  * EXAM KEY CONCEPT: Every claim in the output is traceable to its original
  * source. Conflicts are flagged, not resolved. Coverage gaps are annotated.
  */
-export function synthesizeWithProvenance(allFindings, reportTitle = 'Research Synthesis') {
+export function synthesizeWithProvenance(allFindings: Findings[], reportTitle = 'Research Synthesis'): SynthesizedReport {
   const allClaims = allFindings.flatMap(f => f.findings);
   const conflicts = detectConflicts(allFindings);
   const coverage = assessCoverage(allFindings);
   const sources = collectUniqueSources(allClaims);
 
-  const conflictClaimIds = new Set();
+  const conflictClaimIds = new Set<string>();
   for (const conflict of conflicts) {
     conflictClaimIds.add(conflict.claimA.fullClaim);
     conflictClaimIds.add(conflict.claimB.fullClaim);
@@ -160,12 +261,12 @@ export function synthesizeWithProvenance(allFindings, reportTitle = 'Research Sy
 
 // ─── Coverage Assessment ─────────────────────────────────────────────────────
 
-function assessCoverage(allFindings) {
-  const topicMap = new Map();
+function assessCoverage(allFindings: Findings[]): CoverageEntry[] {
+  const topicMap = new Map<string, { sources: Set<string>; claimCount: number; gaps: string[] }>();
 
   for (const finding of allFindings) {
     if (!topicMap.has(finding.topic)) topicMap.set(finding.topic, { sources: new Set(), claimCount: 0, gaps: [] });
-    const entry = topicMap.get(finding.topic);
+    const entry = topicMap.get(finding.topic)!;
     entry.sources.add(finding.subagentId || 'unknown');
     entry.claimCount += finding.findings.length;
     entry.gaps.push(...(finding.gaps || []));
@@ -180,8 +281,8 @@ function assessCoverage(allFindings) {
   }));
 }
 
-function collectUniqueSources(claims) {
-  const seen = new Map();
+function collectUniqueSources(claims: Claim[]): SourceEntry[] {
+  const seen = new Map<string, SourceEntry>();
   for (const claim of claims) {
     const key = claim.source.url || claim.source.name;
     if (!seen.has(key)) {
@@ -193,8 +294,8 @@ function collectUniqueSources(claims) {
 
 // ─── Report Renderer ─────────────────────────────────────────────────────────
 
-export function renderReport(report) {
-  const lines = [];
+export function renderReport(report: SynthesizedReport): string {
+  const lines: string[] = [];
   lines.push(`# ${report.title}`);
   lines.push(`Generated: ${report.generatedAt}`);
   lines.push(`Claims: ${report.statistics.totalClaims} | Sources: ${report.statistics.totalSources} | Conflicts: ${report.statistics.conflictsDetected}`);
@@ -222,7 +323,7 @@ export function renderReport(report) {
 
   lines.push('## Coverage', '');
   for (const topic of report.coverage) {
-    const icon = { 'well-supported': '+', 'single-source': '~', gap: '!' }[topic.level];
+    const icon = ({ 'well-supported': '+', 'single-source': '~', gap: '!' } as Record<string, string>)[topic.level];
     lines.push(`${icon} **${topic.topic}**: ${topic.level} (${topic.sourceCount} source(s), ${topic.claimCount} claim(s))`);
   }
   lines.push('');
@@ -235,13 +336,19 @@ export function renderReport(report) {
   return lines.join('\n');
 }
 
-// ─── Anti-Pattern Demonstration ─────────���────────────────────────────────────
+// ─── Anti-Pattern Demonstration ──────────────────────────────────────────────
+
+interface AntiPattern {
+  bad: string;
+  problem: string;
+  fix: string;
+}
 
 /**
  * EXAM KEY CONCEPT: These anti-patterns destroy provenance and create
  * unverifiable or fabricated claims.
  */
-export function demonstrateAntiPatterns() {
+export function demonstrateAntiPatterns(): Record<string, AntiPattern> {
   return {
     averaging: { bad: 'AI art tools market grew approximately 50% in 2024.', problem: 'Averages 47% and 52%, creating a fabricated number.', fix: 'Present both with attribution.' },
     droppingAttribution: { bad: 'The AI art tools market experienced significant growth.', problem: 'Loses the specific number and source.', fix: 'Keep number and source.' },
@@ -257,7 +364,7 @@ async function main() {
   console.log('Scenario 3: Research Provenance -- Claim-Source Mapping');
   console.log('='.repeat(60));
 
-  const findings = [
+  const findings: Findings[] = [
     createFindings({
       topic: 'AI in Creative Industries', subagentId: 'doc-analysis-1',
       findings: [

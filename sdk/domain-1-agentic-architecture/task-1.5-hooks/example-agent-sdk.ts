@@ -18,6 +18,7 @@
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { csrServer } from '../../../shared/tools/csr-tools.js';
 import { csrSystemPrompt } from '../../../shared/prompts/csr-system-prompt.js';
 
@@ -27,7 +28,7 @@ const REFUND_THRESHOLD = 500;
 
 // ─── Date Normalization Utilities ───────────────────────────────────────────
 
-function tryParseDate(value) {
+function tryParseDate(value: unknown): string | null {
   if (typeof value === 'number') {
     const YEAR_2000_S = 946684800;
     const YEAR_2100_S = 4102444800;
@@ -43,12 +44,12 @@ function tryParseDate(value) {
   return null;
 }
 
-function normalizeDates(obj) {
+function normalizeDates(obj: unknown): unknown {
   if (obj === null || obj === undefined) return obj;
   if (Array.isArray(obj)) return obj.map(normalizeDates);
   if (typeof obj === 'object') {
-    const normalized = {};
-    for (const [key, value] of Object.entries(obj)) {
+    const normalized: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
       const isDateField = /date|time|created|updated|delivered|expired|at$/i.test(key);
       if (isDateField) {
         const isoDate = tryParseDate(value);
@@ -66,11 +67,12 @@ function normalizeDates(obj) {
 //
 // DETERMINISTIC GUARANTEE: Every date field the model receives is ISO 8601.
 
-async function dateNormalizationHook(input) {
+const dateNormalizationHook: HookCallback = async (_input) => {
+  const input = _input as { tool_name: string; tool_input: Record<string, unknown>; tool_output?: string };
   // Parse the tool output
   let data;
   try {
-    data = JSON.parse(input.tool_output);
+    data = JSON.parse(input.tool_output ?? '');
   } catch {
     return {}; // Not JSON -- no normalization needed
   }
@@ -88,18 +90,20 @@ async function dateNormalizationHook(input) {
   }
 
   return {};
-}
+};
 
 // ─── PreToolUse Hook: Refund Threshold Enforcement ──────────────────────────
 //
 // DETERMINISTIC GUARANTEE: No refund above $500 reaches the backend.
 
-async function refundThresholdHook(input) {
+const refundThresholdHook: HookCallback = async (_input) => {
+  const input = _input as { tool_name: string; tool_input: Record<string, unknown>; tool_output?: string };
   if (input.tool_name !== 'mcp__csr__process_refund') {
     return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
   }
 
-  const amount = input.tool_input?.amount;
+  const toolInput = input.tool_input as Record<string, unknown> | undefined;
+  const amount = toolInput?.amount;
 
   if (typeof amount === 'number' && amount > REFUND_THRESHOLD) {
     console.log(
@@ -108,8 +112,8 @@ async function refundThresholdHook(input) {
 
     return {
       hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
         permissionDecisionReason:
           `Refund amount $${amount} exceeds the automated processing limit of ` +
           `$${REFUND_THRESHOLD}. This refund requires human agent review. ` +
@@ -118,12 +122,12 @@ async function refundThresholdHook(input) {
     };
   }
 
-  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
-}
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'allow' as const } };
+};
 
 // ─── Agent with Both Hooks ──────────────────────────────────────────────────
 
-async function runAgentWithHooks(userMessage) {
+async function runAgentWithHooks(userMessage: string): Promise<string> {
   console.log('\n' + '='.repeat(60));
   console.log('CSR Agent with Hooks (Agent SDK)');
   console.log('='.repeat(60));

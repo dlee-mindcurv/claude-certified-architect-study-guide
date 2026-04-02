@@ -13,7 +13,16 @@
       "Bash(echo \"OK: $f\")",
       "Bash(echo \"FAIL: $f\")",
       "Bash(while read:*)",
-      "Bash(FAILS=0)"
+      "Bash(FAILS=0)",
+      "WebSearch",
+      "Bash(npx tsc:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh pr:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)"
     ]
   }
 }

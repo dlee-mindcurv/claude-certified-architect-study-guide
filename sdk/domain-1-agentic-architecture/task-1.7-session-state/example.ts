@@ -24,11 +24,41 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface SessionMessage {
+  role: string;
+  content: string;
+}
+
+interface SessionMetadata {
+  savedAt?: string;
+  turnCount?: number;
+  startedWithSummary?: boolean;
+  forkedFrom?: string;
+  forkPoint?: number;
+  [key: string]: unknown;
+}
+
+interface SessionData {
+  name: string;
+  messages: SessionMessage[];
+  metadata: SessionMetadata;
+}
+
+interface StructuredFindings {
+  keyFacts?: string[];
+  filesExamined?: { path: string; notes: string }[];
+  openQuestions?: string[];
+  changedSinceLastSession?: { file: string; description: string }[];
+  currentTask?: string;
+}
+
 // ─── Session Storage ────────────────────────────────────────────────────────
 
 const SESSION_DIR = join(process.cwd(), '.sessions');
 
-function saveSession(sessionName, messages, metadata = {}) {
+function saveSession(sessionName: string, messages: SessionMessage[], metadata: SessionMetadata = {}): string {
   if (!existsSync(SESSION_DIR)) {
     mkdirSync(SESSION_DIR, { recursive: true });
   }
@@ -47,10 +77,10 @@ function saveSession(sessionName, messages, metadata = {}) {
   return path;
 }
 
-function loadSession(sessionName) {
+function loadSession(sessionName: string): SessionData | null {
   const path = join(SESSION_DIR, `${sessionName}.json`);
   if (!existsSync(path)) return null;
-  const data = JSON.parse(readFileSync(path, 'utf-8'));
+  const data = JSON.parse(readFileSync(path, 'utf-8')) as SessionData;
   console.log(`[SESSION] Loaded "${sessionName}" (${data.messages.length} messages)`);
   return data;
 }
@@ -60,10 +90,10 @@ function loadSession(sessionName) {
 // Each call to query() is one turn. Session state is managed externally
 // by saving/loading the conversation messages array.
 
-async function startOrResumeSession(sessionName, userMessage, options = {}) {
+async function startOrResumeSession(sessionName: string, userMessage: string, options: { forceNew?: boolean } = {}) {
   const existing = loadSession(sessionName);
 
-  let sessionMessages;
+  let sessionMessages: SessionMessage[];
 
   if (existing && !options.forceNew) {
     console.log(`[SESSION] Resuming "${sessionName}"`);
@@ -105,7 +135,7 @@ async function startOrResumeSession(sessionName, userMessage, options = {}) {
 // Fork creates a new session branching from an existing one.
 // Both share history up to the fork point, then diverge.
 
-async function forkSession(parentSessionName, forkName, forkMessage) {
+async function forkSession(parentSessionName: string, forkName: string, forkMessage: string) {
   const parent = loadSession(parentSessionName);
   if (!parent) {
     throw new Error(`Cannot fork: session "${parentSessionName}" not found`);
@@ -142,28 +172,28 @@ async function forkSession(parentSessionName, forkName, forkMessage) {
 // When starting fresh (stale tool results), inject a structured summary
 // of key findings as the first message.
 
-function createStructuredSummary(findings) {
+function createStructuredSummary(findings: StructuredFindings): string {
   const sections = ['## Prior Investigation Summary', ''];
 
-  if (findings.keyFacts?.length > 0) {
+  if (findings.keyFacts && findings.keyFacts.length > 0) {
     sections.push('### Verified Facts');
     for (const fact of findings.keyFacts) sections.push(`- ${fact}`);
     sections.push('');
   }
 
-  if (findings.filesExamined?.length > 0) {
+  if (findings.filesExamined && findings.filesExamined.length > 0) {
     sections.push('### Key Files');
     for (const file of findings.filesExamined) sections.push(`- \`${file.path}\`: ${file.notes}`);
     sections.push('');
   }
 
-  if (findings.openQuestions?.length > 0) {
+  if (findings.openQuestions && findings.openQuestions.length > 0) {
     sections.push('### Open Questions');
     for (const q of findings.openQuestions) sections.push(`- ${q}`);
     sections.push('');
   }
 
-  if (findings.changedSinceLastSession?.length > 0) {
+  if (findings.changedSinceLastSession && findings.changedSinceLastSession.length > 0) {
     sections.push('### Changes Since Last Session');
     for (const c of findings.changedSinceLastSession) sections.push(`- \`${c.file}\`: ${c.description}`);
     sections.push('');
@@ -175,7 +205,7 @@ function createStructuredSummary(findings) {
   return sections.join('\n');
 }
 
-async function startFreshWithSummary(sessionName, findings) {
+async function startFreshWithSummary(sessionName: string, findings: StructuredFindings) {
   const summary = createStructuredSummary(findings);
   console.log(`[SESSION] Starting fresh "${sessionName}" with prior context`);
 
@@ -200,7 +230,7 @@ async function startFreshWithSummary(sessionName, findings) {
 
 // ─── Pattern 4: Resume vs. Fresh Decision Logic ────────────────────────────
 
-function shouldResumeOrStartFresh(sessionName, options = {}) {
+function shouldResumeOrStartFresh(sessionName: string, options: { staleThresholdMs?: number; maxTurns?: number } = {}): { action: string; reason: string } {
   const { staleThresholdMs = 60 * 60 * 1000, maxTurns = 40 } = options;
 
   const session = loadSession(sessionName);
@@ -208,7 +238,7 @@ function shouldResumeOrStartFresh(sessionName, options = {}) {
     return { action: 'fresh', reason: 'No existing session found.' };
   }
 
-  const savedAt = new Date(session.metadata.savedAt);
+  const savedAt = new Date(session.metadata.savedAt ?? '');
   const ageMs = Date.now() - savedAt.getTime();
 
   if (ageMs > staleThresholdMs) {
@@ -218,7 +248,7 @@ function shouldResumeOrStartFresh(sessionName, options = {}) {
     };
   }
 
-  if (session.metadata.turnCount > maxTurns) {
+  if ((session.metadata.turnCount ?? 0) > maxTurns) {
     return {
       action: 'fresh',
       reason: `Session has ${session.metadata.turnCount} turns (threshold: ${maxTurns}). Context window crowded.`,

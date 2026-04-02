@@ -1,4 +1,5 @@
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback, PreToolUseHookInput, PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import {getCustomerTool,lookupOrderTool, processRefundTool, escalateToHumanTool} from "../../../shared/tools/csr-tools.js";
 import { csrSystemPrompt } from "../../../shared/prompts/csr-system-prompt.js";
 
@@ -10,35 +11,37 @@ const csrServer = createSdkMcpServer({
 })
 
 // ─── PreToolUse Hook: Refund Threshold Enforcement ─────────────────────────
-async function preToolUseHook(input) {
+const preToolUseHook: HookCallback = async (_input) => {
+    const input = _input as PreToolUseHookInput;
     if (input.tool_name === 'mcp__davidleecsr__process_refund') {
-        const amount = input.tool_input?.amount;
+        const amount = (input.tool_input as Record<string, unknown> | undefined)?.amount;
         if (typeof amount === 'number' && amount > 500) {
             console.log(`  [HOOK:PreToolUse] BLOCKED refund of $${amount} (limit: $500)`);
             return {
                 hookSpecificOutput: {
-                    hookEventName: 'PreToolUse',
-                    permissionDecision: 'deny',
+                    hookEventName: 'PreToolUse' as const,
+                    permissionDecision: 'deny' as const,
                     permissionDecisionReason: `Refund $${amount} exceeds $500 limit. Escalate instead.`
                 }
             };
         }
     }
-    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
-}
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'allow' as const } };
+};
 
 // ─── PostToolUse Hook: Log Tool Results ────────────────────────────────────
-async function postToolUseHook(input) {
+const postToolUseHook: HookCallback = async (_input) => {
+    const input = _input as PostToolUseHookInput;
     console.log(`  [HOOK:PostToolUse] ${input.tool_name} completed`);
     return {};
-}
+};
 
-async function postToolUseHook2(input) {
-    console.log(`  [HOOK:PostToolUse] ${input} completed`);
+const postToolUseHook2: HookCallback = async (_input) => {
+    console.log(`  [HOOK:PostToolUse] ${_input} completed`);
     return {};
-}
+};
 
-async function runAgent(userMessage) {
+async function runAgent(userMessage: string): Promise<void> {
     console.log('prompt: ', userMessage, '\n')
 
     for await (const message of query({

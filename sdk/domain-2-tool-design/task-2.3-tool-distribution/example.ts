@@ -83,7 +83,7 @@ const synthesisAgent = {
 
 // ─── Run: Scoped Tools (Correct Pattern) ──────────────────────────────────
 
-async function runScopedDemo() {
+async function runScopedDemo(): Promise<void> {
   console.log('=== SCOPED TOOLS (correct pattern) ===\n');
   console.log('Each subagent gets ONLY its relevant tools:');
   console.log('  search-agent:    [web_search]');
@@ -105,11 +105,11 @@ async function runScopedDemo() {
       },
       maxTurns: 10,
       hooks: {
-        postToolUse: async ({ toolName, toolInput }) => {
+        postToolUse: async ({ toolName, toolInput }: { toolName: string; toolInput: unknown }) => {
           console.log(`  Tool: ${toolName}(${JSON.stringify(toolInput).substring(0, 60)})`);
         },
       },
-    },
+    } as any,
   })) {
     if (message.type === 'result' && message.subtype === 'success') {
       console.log(`\n  Result: ${message.result.substring(0, 200)}...`);
@@ -119,7 +119,7 @@ async function runScopedDemo() {
 
 // ─── Run: All Tools (Anti-Pattern) ────────────────────────────────────────
 
-async function runAllToolsDemo() {
+async function runAllToolsDemo(): Promise<void> {
   console.log('\n\n=== ALL TOOLS (anti-pattern) ===\n');
   console.log('Giving ALL 3 tools to a single agent. It may call');
   console.log('analyze_document or verify_fact instead of searching first.\n');
@@ -131,11 +131,11 @@ async function runAllToolsDemo() {
       mcpServers: [researchServer],
       maxTurns: 5,
       hooks: {
-        postToolUse: async ({ toolName }) => {
+        postToolUse: async ({ toolName }: { toolName: string }) => {
           console.log(`  Tool: ${toolName}`);
         },
       },
-    },
+    } as any,
   })) {
     if (message.type === 'result' && message.subtype === 'success') {
       console.log(`\n  Result: ${message.result.substring(0, 200)}...`);
@@ -145,7 +145,7 @@ async function runAllToolsDemo() {
 
 // ─── Main ─────────────────────────────────────────────────────────────────
 
-async function main() {
+async function main(): Promise<void> {
   console.log('Task 2.3: Tool Distribution — Scoped vs. All Tools\n');
 
   await runScopedDemo();

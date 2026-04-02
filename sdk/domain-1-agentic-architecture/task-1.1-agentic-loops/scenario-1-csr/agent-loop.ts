@@ -19,7 +19,7 @@ import { csrSystemPrompt } from '../../../../shared/prompts/csr-system-prompt.js
 
 // ─── CSR Agent via query() ─────────────────────────────────────────────────
 
-async function runCsrAgent(userMessage) {
+async function runCsrAgent(userMessage: string): Promise<string> {
   console.log('\n' + '='.repeat(60));
   console.log('CSR Agent -- Scenario 1 (Agent SDK)');
   console.log('='.repeat(60));

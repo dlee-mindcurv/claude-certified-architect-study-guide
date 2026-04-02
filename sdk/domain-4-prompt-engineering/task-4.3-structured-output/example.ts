@@ -67,7 +67,7 @@ over an 18-month period starting in September 2023.`,
 // EXAM KEY CONCEPT: tool_choice: { type: "tool", name: "extract_document_info" }
 // forces Claude to call the specified tool, guaranteeing structured output.
 
-async function extractWithForcedTool(docKey) {
+async function extractWithForcedTool(docKey: keyof typeof documents) {
   const doc = documents[docKey];
   console.log(`\n${'─'.repeat(60)}`);
   console.log(`Document: ${doc.label}`);
@@ -78,7 +78,7 @@ async function extractWithForcedTool(docKey) {
     max_tokens: 2048,
     // ── EXAM KEY CONCEPT: Forced tool selection ────────────────────────
     // Claude MUST call this specific tool -- it cannot respond with text.
-    tools: [documentExtractionTool],
+    tools: [documentExtractionTool as Anthropic.Tool],
     tool_choice: { type: 'tool', name: 'extract_document_info' },
     messages: [
       {
@@ -96,7 +96,7 @@ async function extractWithForcedTool(docKey) {
     return null;
   }
 
-  const extraction = toolUseBlock.input;
+  const extraction = toolUseBlock.input as Record<string, unknown>;
   console.log('\nExtracted data:');
   console.log(JSON.stringify(extraction, null, 2));
 
@@ -119,8 +119,8 @@ async function demonstrateToolChoiceOptions() {
   const autoResponse = await client.messages.create({
     model: MODEL,
     max_tokens: 2048,
-    tools: [documentExtractionTool],
-    tool_choice: 'auto',
+    tools: [documentExtractionTool as Anthropic.Tool],
+    tool_choice: { type: 'auto' as const },
     messages: [
       { role: 'user', content: `What kind of document is this?\n\n${testDoc}` },
     ],
@@ -139,8 +139,8 @@ async function demonstrateToolChoiceOptions() {
   const anyResponse = await client.messages.create({
     model: MODEL,
     max_tokens: 2048,
-    tools: [documentExtractionTool],
-    tool_choice: 'any',
+    tools: [documentExtractionTool as Anthropic.Tool],
+    tool_choice: { type: 'any' as const },
     messages: [
       { role: 'user', content: `What kind of document is this?\n\n${testDoc}` },
     ],
@@ -157,7 +157,7 @@ async function demonstrateToolChoiceOptions() {
   const forcedResponse = await client.messages.create({
     model: MODEL,
     max_tokens: 2048,
-    tools: [documentExtractionTool],
+    tools: [documentExtractionTool as Anthropic.Tool],
     tool_choice: { type: 'tool', name: 'extract_document_info' },
     messages: [
       { role: 'user', content: `What kind of document is this?\n\n${testDoc}` },
@@ -221,7 +221,7 @@ async function main() {
   console.log('PART 1: Forced Tool Extraction Across Document Types');
   console.log('='.repeat(60));
 
-  for (const docKey of Object.keys(documents)) {
+  for (const docKey of Object.keys(documents) as Array<keyof typeof documents>) {
     await extractWithForcedTool(docKey);
   }
 
