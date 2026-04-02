@@ -20,6 +20,35 @@
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+// ─── Types ───────────────────────────────────────────────────────────────
+
+interface PropagatedErrorInput {
+  subagentId: string;
+  taskDescription: string;
+  errorCategory: string;
+  isRetryable: boolean;
+  message: string;
+  partialResults?: string[];
+}
+
+interface Alternative {
+  approach: string;
+  description: string;
+  confidence: string;
+}
+
+interface PropagatedError {
+  errorCategory: string;
+  isRetryable: boolean;
+  message: string;
+  subagentId: string;
+  subagentTask: string;
+  partialResults: string[];
+  partialResultCount: number;
+  alternatives: Alternative[];
+  failedAt: string;
+}
+
 // ─── Subagent Error Context Builder ───────────────────────────────────────
 // Wraps raw tool errors with subagent-level context for the coordinator.
 
@@ -37,7 +66,7 @@ export function buildPropagatedError({
   isRetryable,
   message,
   partialResults = [],
-}) {
+}: PropagatedErrorInput): PropagatedError {
   const alternatives = buildAlternatives(errorCategory, subagentId);
 
   return {
@@ -55,8 +84,8 @@ export function buildPropagatedError({
 
 // ─── Recovery Alternative Builder ─────────────────────────────────────────
 
-function buildAlternatives(errorCategory, subagentId) {
-  const alternatives = [];
+function buildAlternatives(errorCategory: string, subagentId: string): Alternative[] {
+  const alternatives: Alternative[] = [];
 
   switch (errorCategory) {
     case 'transient':
@@ -94,7 +123,7 @@ function buildAlternatives(errorCategory, subagentId) {
  * - validation + high-confidence alternative -> reassign task
  * - all others -> proceed with partial results, note coverage gap
  */
-export function handlePropagatedError(propagatedError, attemptNumber = 1) {
+export function handlePropagatedError(propagatedError: PropagatedError, attemptNumber = 1) {
   const maxAttempts = 3;
 
   if (propagatedError.errorCategory === 'transient' && attemptNumber < maxAttempts) {
@@ -108,7 +137,7 @@ export function handlePropagatedError(propagatedError, attemptNumber = 1) {
   }
 
   if (propagatedError.errorCategory === 'validation') {
-    const alt = propagatedError.alternatives?.find(a => a.confidence === 'high');
+    const alt = propagatedError.alternatives?.find((a: Alternative) => a.confidence === 'high');
     if (alt) {
       return {
         action: 'reassign',
@@ -164,7 +193,7 @@ export const reportSubagentErrorTool = tool(
     const decision = handlePropagatedError(propagated, 1);
 
     return {
-      content: [{ type: 'text', text: JSON.stringify({ propagatedError: propagated, coordinatorDecision: decision }) }],
+      content: [{ type: 'text' as const, text: JSON.stringify({ propagatedError: propagated, coordinatorDecision: decision }) }],
     };
   },
 );

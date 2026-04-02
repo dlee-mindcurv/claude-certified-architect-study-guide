@@ -30,7 +30,42 @@ const MODEL = 'claude-sonnet-4-20250514';
 // EXAM KEY CONCEPT: Each extracted field carries its own confidence score.
 // A high document-level confidence can mask a low field-level confidence.
 
-const simulatedExtractions = {
+interface FieldData {
+  value: unknown;
+  confidence: number;
+  source: string | null;
+  note?: string;
+}
+
+interface Extraction {
+  documentId: string;
+  documentType: string;
+  fields: Record<string, FieldData>;
+}
+
+interface ReviewField {
+  field: string;
+  value: unknown;
+  confidence: number;
+  reason: string;
+}
+
+interface AcceptedField {
+  field: string;
+  value: unknown;
+  confidence: number;
+}
+
+interface RoutingDecision {
+  documentId: string;
+  documentType: string;
+  route: string;
+  reasons: string[];
+  fieldsForReview: ReviewField[];
+  fieldsAccepted: AcceptedField[];
+}
+
+const simulatedExtractions: Record<string, Extraction> = {
   'invoice-001': {
     documentId: 'invoice-001',
     documentType: 'invoice',
@@ -60,14 +95,14 @@ const simulatedExtractions = {
 // EXAM KEY CONCEPT: Routing decisions are based on calibrated thresholds,
 // not arbitrary cutoffs. Each reason for routing is explicit and logged.
 
-const ROUTING_THRESHOLDS = {
+const ROUTING_THRESHOLDS: Record<string, number> = {
   default: 0.80,
   financial: 0.95,
   required_field: 0.90,
 };
 
-function routeExtraction(extraction) {
-  const decision = {
+function routeExtraction(extraction: Extraction): RoutingDecision {
+  const decision: RoutingDecision = {
     documentId: extraction.documentId,
     documentType: extraction.documentType,
     route: 'auto_accept',
@@ -126,8 +161,8 @@ function routeExtraction(extraction) {
   return decision;
 }
 
-function getRequiredFields(documentType) {
-  const required = {
+function getRequiredFields(documentType: string): string[] {
+  const required: Record<string, string[]> = {
     invoice: ['invoice_number', 'stated_total', 'date'],
     contract: ['parties', 'effective_date', 'term'],
     research_paper: ['title', 'authors'],
@@ -142,16 +177,30 @@ function getRequiredFields(documentType) {
 // combination gets enough samples. Pure random sampling over-represents
 // high-volume types.
 
-function generateSamplingPlan(extractions, samplesPerStratum = 50) {
-  const strata = new Map();
+interface StratumDoc {
+  documentId: string;
+  value: unknown;
+  confidence: number;
+}
+
+interface SamplingStratum {
+  documentType: string;
+  field: string;
+  totalCount: number;
+  documents: StratumDoc[];
+  sampleSize: number;
+}
+
+function generateSamplingPlan(extractions: Extraction[], samplesPerStratum = 50): { strata: SamplingStratum[]; totalStrata: number } {
+  const strata = new Map<string, SamplingStratum>();
 
   for (const extraction of extractions) {
     for (const [fieldName, fieldData] of Object.entries(extraction.fields)) {
       const key = `${extraction.documentType}:${fieldName}`;
       if (!strata.has(key)) {
-        strata.set(key, { documentType: extraction.documentType, field: fieldName, totalCount: 0, documents: [] });
+        strata.set(key, { documentType: extraction.documentType, field: fieldName, totalCount: 0, documents: [], sampleSize: 0 });
       }
-      const stratum = strata.get(key);
+      const stratum = strata.get(key)!;
       stratum.totalCount++;
       stratum.documents.push({ documentId: extraction.documentId, value: fieldData.value, confidence: fieldData.confidence });
     }
@@ -169,8 +218,16 @@ function generateSamplingPlan(extractions, samplesPerStratum = 50) {
 // EXAM KEY CONCEPT: Before automating any segment, measure its specific error
 // rate. Only automate segments that meet the acceptable threshold.
 
-function analyzeSegmentAccuracy(samplingPlan) {
-  const simulatedErrorRates = {
+interface SegmentResult {
+  documentType: string;
+  field: string;
+  errorRate: number;
+  meetsThreshold: boolean;
+  recommendation: string;
+}
+
+function analyzeSegmentAccuracy(samplingPlan: { strata: SamplingStratum[] }): SegmentResult[] {
+  const simulatedErrorRates: Record<string, number> = {
     'invoice:invoice_number': 0.01, 'invoice:date': 0.03, 'invoice:vendor': 0.45,
     'invoice:stated_total': 0.02, 'invoice:calculated_total': 0.01,
     'contract:parties': 0.04, 'contract:effective_date': 0.03,
@@ -179,11 +236,12 @@ function analyzeSegmentAccuracy(samplingPlan) {
 
   const AUTOMATION_THRESHOLD = 0.05;
 
-  return samplingPlan.strata.map(stratum => {
+  return samplingPlan.strata.map((stratum: SamplingStratum) => {
     const key = `${stratum.documentType}:${stratum.field}`;
     const errorRate = simulatedErrorRates[key] || 0.10;
     return {
-      ...stratum,
+      documentType: stratum.documentType,
+      field: stratum.field,
       errorRate,
       meetsThreshold: errorRate <= AUTOMATION_THRESHOLD,
       recommendation: errorRate <= AUTOMATION_THRESHOLD
@@ -202,7 +260,7 @@ async function main() {
 
   // Phase 1: Route individual extractions
   console.log('\n--- Phase 1: Route Extractions ---');
-  const allDecisions = [];
+  const allDecisions: RoutingDecision[] = [];
 
   for (const [docId, extraction] of Object.entries(simulatedExtractions)) {
     const decision = routeExtraction(extraction);
@@ -229,14 +287,14 @@ async function main() {
   console.log('\n--- Phase 3: Segment-Level Accuracy ---');
   const segmentResults = analyzeSegmentAccuracy(samplingPlan);
 
-  const automatable = segmentResults.filter(s => s.meetsThreshold);
-  const needsReview = segmentResults.filter(s => !s.meetsThreshold);
+  const automatable = segmentResults.filter((s: SegmentResult) => s.meetsThreshold);
+  const needsReview = segmentResults.filter((s: SegmentResult) => !s.meetsThreshold);
 
   console.log(`\n  Automatable (<=5% error): ${automatable.length}`);
-  automatable.forEach(s => console.log(`    + ${s.documentType}:${s.field} -- ${(s.errorRate * 100).toFixed(0)}% error`));
+  automatable.forEach((s: SegmentResult) => console.log(`    + ${s.documentType}:${s.field} -- ${(s.errorRate * 100).toFixed(0)}% error`));
 
   console.log(`\n  Needs review (>5% error): ${needsReview.length}`);
-  needsReview.forEach(s => console.log(`    ! ${s.documentType}:${s.field} -- ${(s.errorRate * 100).toFixed(0)}% error`));
+  needsReview.forEach((s: SegmentResult) => console.log(`    ! ${s.documentType}:${s.field} -- ${(s.errorRate * 100).toFixed(0)}% error`));
 
   console.log('\n  TAKEAWAY: Aggregate accuracy hides segment-level problems.');
   console.log('  Always analyze by segment before deciding to automate.');

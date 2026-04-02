@@ -21,6 +21,56 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface PRFile {
+  filename: string;
+  status: string;
+  diff: string;
+}
+
+interface ReviewIssue {
+  severity: string;
+  category: string;
+  line: string;
+  description: string;
+  suggestion: string;
+}
+
+interface FileReview {
+  filename: string;
+  issues: ReviewIssue[];
+  summary: string;
+  approvalStatus: string;
+}
+
+interface CrossFileIssue {
+  severity: string;
+  filesInvolved: string[];
+  description: string;
+  suggestion: string;
+}
+
+interface IntegrationReview {
+  crossFileIssues: CrossFileIssue[];
+  overallVerdict: string;
+  summary: string;
+}
+
+interface PRMetadata {
+  number: number;
+  title: string;
+}
+
+interface CIResult {
+  pr: PRMetadata;
+  totalIssues: number;
+  blockingIssues: number;
+  shouldBlock: boolean;
+  perFileReviews: FileReview[];
+  integrationReview: IntegrationReview;
+}
+
 // ─── CI Configuration ───────────────────────────────────────────────────────
 
 const CI_CONFIG = {
@@ -30,7 +80,7 @@ const CI_CONFIG = {
 
 // ─── Simulated Multi-File PR ────────────────────────────────────────────────
 
-const samplePR = {
+const samplePR: { number: number; title: string; files: PRFile[] } = {
   number: 42,
   title: 'Add user notification preferences',
   files: [
@@ -144,7 +194,7 @@ Return JSON: {
   "approvalStatus": "approve|request_changes|comment"
 }`;
 
-async function reviewFile(file) {
+async function reviewFile(file: PRFile): Promise<FileReview> {
   let result = '{}';
 
   for await (const message of query({
@@ -170,7 +220,7 @@ async function reviewFile(file) {
  * Run per-file reviews in parallel.
  * All query() calls are independent -- Promise.all reduces wall-clock time.
  */
-async function runPerFileReviews(files) {
+async function runPerFileReviews(files: PRFile[]): Promise<FileReview[]> {
   console.log(`\n--- Stage 1: Per-File Review (${files.length} files) ---\n`);
   const reviews = await Promise.all(files.map(reviewFile));
   for (const review of reviews) {
@@ -189,7 +239,7 @@ Return JSON: {
   "summary": "<PR summary>"
 }`;
 
-async function runIntegrationReview(perFileReviews, prMetadata) {
+async function runIntegrationReview(perFileReviews: FileReview[], prMetadata: PRMetadata): Promise<IntegrationReview> {
   console.log('\n--- Stage 2: Cross-File Integration ---\n');
 
   let result = '{}';
@@ -218,7 +268,7 @@ async function runIntegrationReview(perFileReviews, prMetadata) {
 
 // ─── CI Pipeline Orchestrator ───────────────────────────────────────────────
 
-async function reviewPullRequest(pr) {
+async function reviewPullRequest(pr: { number: number; title: string; files: PRFile[] }): Promise<CIResult> {
   console.log(`=== CI Review: PR #${pr.number} -- ${pr.title} ===`);
   console.log(`Files changed: ${pr.files.length}`);
 
@@ -235,7 +285,7 @@ async function reviewPullRequest(pr) {
 
   const blockingIssues = allIssues.filter(i =>
     CI_CONFIG.blockingSeverities.includes(i.severity) ||
-    CI_CONFIG.blockingSeverities.includes(i.category)
+    CI_CONFIG.blockingSeverities.includes((i as { category?: string }).category ?? '')
   );
 
   const ciResult = {
@@ -257,7 +307,7 @@ async function reviewPullRequest(pr) {
 
 // ─── PR Comment Formatter ───────────────────────────────────────────────────
 
-function formatPRComment(ciResult) {
+function formatPRComment(ciResult: CIResult): string {
   const lines = [];
   lines.push(`## Automated Code Review -- PR #${ciResult.pr.number}`);
   lines.push('');

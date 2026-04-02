@@ -17,6 +17,46 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface SurveyResult {
+  entryPoints?: string[];
+  redFlags?: { file: string; concern: string }[];
+  investigationCandidates?: string[];
+  raw?: string;
+  [key: string]: unknown;
+}
+
+interface InvestigationTarget {
+  file: string;
+  priority: number;
+  reason: string;
+  estimatedDifficulty: string;
+}
+
+interface InvestigationPlan {
+  targets: InvestigationTarget[];
+  investigationOrder?: string[];
+  rationale?: string;
+  raw?: string;
+}
+
+interface InvestigationIssue {
+  severity: string;
+  category: string;
+  description: string;
+  recommendation: string;
+}
+
+interface InvestigationFinding {
+  file: string;
+  issues: InvestigationIssue[];
+  newTargets?: string[];
+  refactoringEffort?: string;
+  summary?: string;
+  raw?: string;
+}
+
 // ─── Simulated Codebase Data ────────────────────────────────────────────────
 
 const MOCK_DIRECTORY_TREE = `
@@ -92,7 +132,7 @@ app.listen(3000);
 
 // ─── Phase 1: Map Structure ─────────────────────────────────────────────────
 
-async function mapStructure() {
+async function mapStructure(): Promise<SurveyResult> {
   console.log('Phase 1: Mapping codebase structure...\n');
 
   let result = '{}';
@@ -131,7 +171,7 @@ Return JSON: {
 
 // ─── Phase 2: Identify High-Impact Areas ────────────────────────────────────
 
-async function identifyHighImpactAreas(surveyResults) {
+async function identifyHighImpactAreas(surveyResults: SurveyResult): Promise<InvestigationPlan> {
   console.log('\nPhase 2: Identifying high-impact areas...\n');
 
   let result = '{}';
@@ -166,7 +206,7 @@ Rank the top 5 investigation targets by impact. Return JSON: {
 
 // ─── Phase 3: Investigate Targets ───────────────────────────────────────────
 
-const MOCK_FILE_CONTENTS = {
+const MOCK_FILE_CONTENTS: Record<string, string> = {
   'src/services/legacy-billing.js': `// DO NOT TOUCH -- this handles all billing logic
 // Last modified: 2019-03-15
 const moment = require('moment');
@@ -192,17 +232,17 @@ async function processPayment(orderId, paymentMethod) {
 module.exports = { processPayment };`,
 };
 
-async function investigateTargets(plan) {
+async function investigateTargets(plan: InvestigationPlan): Promise<InvestigationFinding[]> {
   console.log('\nPhase 3: Investigating targets...\n');
 
   const targets = (plan.targets ?? []).map(t => t.file);
-  const investigated = new Set();
-  const allFindings = [];
+  const investigated = new Set<string>();
+  const allFindings: InvestigationFinding[] = [];
   const queue = [...targets];
 
   // EXAM KEY CONCEPT: Adaptive -- new targets discovered during investigation
   while (queue.length > 0 && investigated.size < 8) {
-    const target = queue.shift();
+    const target = queue.shift()!;
     if (investigated.has(target)) continue;
     investigated.add(target);
 

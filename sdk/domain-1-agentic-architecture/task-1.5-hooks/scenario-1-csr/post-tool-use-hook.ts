@@ -19,11 +19,13 @@
  *   Both are configured in the hooks section of query() options.
  */
 
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
+
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 const REFUND_THRESHOLD = 500;
 
-const STATUS_CODE_MAP = {
+const STATUS_CODE_MAP: Record<number, string> = {
   0: 'unknown', 1: 'pending', 2: 'processing', 3: 'shipped',
   4: 'delivered', 5: 'cancelled', 6: 'returned', 7: 'refunded',
   100: 'pending_approval', 101: 'approved', 102: 'rejected',
@@ -31,7 +33,7 @@ const STATUS_CODE_MAP = {
 
 // ─── Date Normalization ─────────────────────────────────────────────────────
 
-function tryParseDate(value) {
+function tryParseDate(value: unknown): string | null {
   if (typeof value === 'number') {
     const YEAR_2000_S = 946684800;
     const YEAR_2100_S = 4102444800;
@@ -49,13 +51,13 @@ function tryParseDate(value) {
   return null;
 }
 
-function isDateFieldName(key) {
+function isDateFieldName(key: string): boolean {
   return /date|time|created|updated|delivered|expired|At$|_at$/i.test(key);
 }
 
 // ─── Currency Normalization ─────────────────────────────────────────────────
 
-function tryParseCurrency(value) {
+function tryParseCurrency(value: unknown): number | null {
   if (typeof value === 'number') return null;
   if (typeof value !== 'string') return null;
   const match = value.match(/^\$?\s*([\d,]+\.?\d*)\s*(USD)?$|^USD\s*([\d,]+\.?\d*)$/i);
@@ -67,29 +69,29 @@ function tryParseCurrency(value) {
   return null;
 }
 
-function isCurrencyFieldName(key) {
+function isCurrencyFieldName(key: string): boolean {
   return /price|amount|total|cost|fee|charge|balance|refund/i.test(key);
 }
 
 // ─── Status Code Normalization ──────────────────────────────────────────────
 
-function isStatusFieldName(key) { return /status|state/i.test(key); }
+function isStatusFieldName(key: string): boolean { return /status|state/i.test(key); }
 
-function tryMapStatusCode(value) {
-  if (typeof value === 'number' && STATUS_CODE_MAP[value] !== undefined) {
-    return STATUS_CODE_MAP[value];
+function tryMapStatusCode(value: unknown): string | null {
+  if (typeof value === 'number' && value in STATUS_CODE_MAP) {
+    return STATUS_CODE_MAP[value]!;
   }
   return null;
 }
 
 // ─── Recursive Normalization Engine ─────────────────────────────────────────
 
-function normalizeData(obj) {
+function normalizeData(obj: unknown): unknown {
   if (obj === null || obj === undefined) return obj;
   if (Array.isArray(obj)) return obj.map(normalizeData);
   if (typeof obj === 'object') {
-    const result = {};
-    for (const [key, value] of Object.entries(obj)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
       if (isDateFieldName(key)) {
         const isoDate = tryParseDate(value);
         if (isoDate !== null) { result[key] = isoDate; continue; }
@@ -114,10 +116,11 @@ function normalizeData(obj) {
 // This hook matches the HookCallback signature:
 // (input: PostToolUseHookInput, toolUseID, { signal }) => Promise<HookJSONOutput>
 
-export async function postToolUseNormalizationHook(input) {
+export const postToolUseNormalizationHook: HookCallback = async (_input) => {
+  const input = _input as { tool_name: string; tool_input: Record<string, unknown>; tool_output?: string };
   let data;
   try {
-    data = JSON.parse(input.tool_output);
+    data = JSON.parse(input.tool_output ?? '');
   } catch {
     return {};
   }
@@ -133,16 +136,18 @@ export async function postToolUseNormalizationHook(input) {
   }
 
   return {};
-}
+};
 
 // ─── PreToolUse Hook: Refund Threshold Enforcement ──────────────────────────
 
-export async function preToolUseRefundThresholdHook(input) {
+export const preToolUseRefundThresholdHook: HookCallback = async (_input) => {
+  const input = _input as { tool_name: string; tool_input: Record<string, unknown>; tool_output?: string };
   if (input.tool_name !== 'mcp__csr__process_refund') {
     return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
   }
 
-  const amount = input.tool_input?.amount;
+  const toolInput = input.tool_input as Record<string, unknown> | undefined;
+  const amount = toolInput?.amount;
 
   if (typeof amount === 'number' && amount > REFUND_THRESHOLD) {
     console.log(
@@ -150,8 +155,8 @@ export async function preToolUseRefundThresholdHook(input) {
     );
     return {
       hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
         permissionDecisionReason:
           `Refund amount $${amount.toFixed(2)} exceeds the automated processing ` +
           `limit of $${REFUND_THRESHOLD.toFixed(2)}. This refund requires human ` +
@@ -160,8 +165,8 @@ export async function preToolUseRefundThresholdHook(input) {
     };
   }
 
-  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
-}
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'allow' as const } };
+};
 
 // ─── Demo / Self-Test ───────────────────────────────────────────────────────
 

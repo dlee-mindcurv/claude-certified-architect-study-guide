@@ -88,7 +88,7 @@ const codeAnalysisServer = createSdkMcpServer({
 
 // ─── Step 3: Run agent with mcpServers option ─────────────────────────────
 
-async function main() {
+async function main(): Promise<void> {
   console.log('Task 2.4: MCP Integration with createSdkMcpServer\n');
 
   console.log('Step 1: Defined tools with tool()');
@@ -113,12 +113,12 @@ async function main() {
       mcpServers: [codeAnalysisServer],   // Connect the MCP server
       maxTurns: 6,
       hooks: {
-        postToolUse: async ({ toolName, toolInput, toolResult }) => {
+        postToolUse: async ({ toolName, toolInput, toolResult }: { toolName: string; toolInput: unknown; toolResult: unknown }) => {
           console.log(`  Tool call: ${toolName}`);
           console.log(`    Input: ${JSON.stringify(toolInput)}`);
         },
       },
-    },
+    } as any,
   })) {
     if (message.type === 'result' && message.subtype === 'success') {
       console.log(`\n  Agent response: ${message.result.substring(0, 300)}...`);

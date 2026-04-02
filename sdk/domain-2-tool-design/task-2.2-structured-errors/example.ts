@@ -49,7 +49,7 @@ Your recovery strategy depends on the error category:
 
 // ─── Run Scenario ─────────────────────────────────────────────────────────
 
-async function runScenario(label, userMessage) {
+async function runScenario(label: string, userMessage: string): Promise<void> {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`Scenario: ${label}`);
   console.log(`User: "${userMessage}"`);
@@ -62,7 +62,7 @@ async function runScenario(label, userMessage) {
       mcpServers: [csrServer],
       maxTurns: 10,
       hooks: {
-        postToolUse: async ({ toolName, toolInput, toolResult }) => {
+        postToolUse: async ({ toolName, toolInput, toolResult }: { toolName: string; toolInput: unknown; toolResult: any }) => {
           const shortInput = JSON.stringify(toolInput).substring(0, 80);
           console.log(`  Tool: ${toolName}(${shortInput})`);
 
@@ -76,7 +76,7 @@ async function runScenario(label, userMessage) {
           }
         },
       },
-    },
+    } as any,
   })) {
     if (message.type === 'result' && message.subtype === 'success') {
       console.log(`\n  Agent: ${message.result.substring(0, 200)}...`);
@@ -86,7 +86,7 @@ async function runScenario(label, userMessage) {
 
 // ─── Demonstration Scenarios ──────────────────────────────────────────────
 
-async function main() {
+async function main(): Promise<void> {
   console.log('Task 2.2: Structured Error Handling — Agent Recovery\n');
 
   // Scenario A: Business rule error

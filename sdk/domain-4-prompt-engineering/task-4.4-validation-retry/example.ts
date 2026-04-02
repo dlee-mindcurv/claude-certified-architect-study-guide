@@ -17,6 +17,44 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../shared/schemas/extraction-output.js';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface Extraction {
+  document_type?: string;
+  field_confidence?: Record<string, number>;
+  date?: string | null;
+  monetary_values?: Array<{
+    label: string;
+    stated_value?: number | null;
+    calculated_value?: number | null;
+    conflict_detected?: boolean;
+  }>;
+  [key: string]: unknown;
+}
+
+interface ValidationError {
+  rule: string;
+  message: string;
+  errorType: string;
+  pattern: string;
+}
+
+interface ValidationRule {
+  name: string;
+  check: (extraction: Extraction) => boolean;
+  errorMessage: string | ((extraction: Extraction) => string);
+  errorType: string;
+  pattern: string;
+}
+
+interface ExtractionResult {
+  extraction: Extraction;
+  attempts: number;
+  errorLog: Array<ValidationError & { attempt: number }>;
+  status: string;
+  nonRetryableErrors?: ValidationError[];
+}
+
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 const client = new Anthropic();
@@ -30,48 +68,48 @@ const MAX_RETRIES = 2;
 // - errorType: 'retryable' or 'non_retryable'
 // - pattern: detected_pattern for systematic tracking
 
-const validationRules = [
+const validationRules: ValidationRule[] = [
   {
     name: 'required-document-type',
-    check: (extraction) => !!extraction.document_type,
+    check: (extraction: Extraction) => !!extraction.document_type,
     errorMessage: 'document_type is required but missing',
     errorType: 'retryable',
     pattern: 'missing-required-field',
   },
   {
     name: 'required-field-confidence',
-    check: (extraction) => !!extraction.field_confidence,
+    check: (extraction: Extraction) => !!extraction.field_confidence,
     errorMessage: 'field_confidence is required but missing',
     errorType: 'retryable',
     pattern: 'missing-required-field',
   },
   {
     name: 'valid-date-format',
-    check: (extraction) => {
+    check: (extraction: Extraction) => {
       if (extraction.date === null) return true;
-      return /^\d{4}(-\d{2}(-\d{2})?)?$/.test(extraction.date);
+      return /^\d{4}(-\d{2}(-\d{2})?)?$/.test(extraction.date!);
     },
-    errorMessage: (extraction) =>
+    errorMessage: (extraction: Extraction) =>
       `date "${extraction.date}" is not in ISO 8601 format (expected YYYY, YYYY-MM, or YYYY-MM-DD)`,
     errorType: 'retryable',
     pattern: 'date-format-mismatch',
   },
   {
     name: 'valid-document-type-enum',
-    check: (extraction) => {
+    check: (extraction: Extraction) => {
       const validTypes = ['invoice', 'contract', 'research_paper', 'receipt', 'letter', 'report', 'other'];
-      return validTypes.includes(extraction.document_type);
+      return validTypes.includes(extraction.document_type!);
     },
-    errorMessage: (extraction) =>
+    errorMessage: (extraction: Extraction) =>
       `document_type "${extraction.document_type}" is not a valid enum value`,
     errorType: 'retryable',
     pattern: 'enum-violation',
   },
   {
     name: 'confidence-range',
-    check: (extraction) => {
+    check: (extraction: Extraction) => {
       if (!extraction.field_confidence) return true;
-      return Object.values(extraction.field_confidence).every(v => v >= 0 && v <= 1);
+      return Object.values(extraction.field_confidence).every((v: number) => v >= 0 && v <= 1);
     },
     errorMessage: 'confidence scores must be between 0 and 1',
     errorType: 'retryable',
@@ -79,7 +117,7 @@ const validationRules = [
   },
   {
     name: 'monetary-conflict-detection',
-    check: (extraction) => {
+    check: (extraction: Extraction) => {
       if (!extraction.monetary_values) return true;
       for (const mv of extraction.monetary_values) {
         if (mv.stated_value != null && mv.calculated_value != null) {
@@ -98,8 +136,8 @@ const validationRules = [
 
 // ─── Validation Engine ──────────────────────────────────────────────────────
 
-function validateExtraction(extraction) {
-  const errors = [];
+function validateExtraction(extraction: Extraction) {
+  const errors: ValidationError[] = [];
 
   for (const rule of validationRules) {
     if (!rule.check(extraction)) {
@@ -135,13 +173,13 @@ function validateExtraction(extraction) {
  * Non-retryable errors are accepted immediately (retrying would waste tokens
  * or cause hallucination).
  */
-async function extractWithRetry(documentText, documentId) {
+async function extractWithRetry(documentText: string, documentId: string): Promise<ExtractionResult | undefined> {
   console.log(`\nExtracting: ${documentId}`);
   console.log('─'.repeat(50));
 
-  const errorLog = [];
+  const errorLog: Array<ValidationError & { attempt: number }> = [];
   let attempt = 0;
-  let messages = [
+  const messages: Anthropic.MessageParam[] = [
     {
       role: 'user',
       content: `Extract structured information from this document. Return null for fields not present in the source -- do not fabricate values. Compare calculated and stated totals and set conflict_detected appropriately.
@@ -159,18 +197,18 @@ ${documentText}`,
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: 2048,
-      tools: [documentExtractionTool],
-      tool_choice: { type: 'tool', name: 'extract_document_info' },
+      tools: [documentExtractionTool as Anthropic.Tool],
+      tool_choice: { type: 'tool' as const, name: 'extract_document_info' },
       messages,
     });
 
-    const toolUse = response.content.find(b => b.type === 'tool_use');
+    const toolUse = response.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
     if (!toolUse) {
       console.log('  ERROR: No tool_use in response (unexpected)');
       break;
     }
 
-    const extraction = toolUse.input;
+    const extraction = toolUse.input as Extraction;
     console.log(`  document_type: ${extraction.document_type}`);
 
     // ── Validate ───────────────────────────────────────────────────
@@ -221,9 +259,9 @@ ${documentText}`,
       .map(e => `- ${e.message}`)
       .join('\n');
 
-    messages.push({ role: 'assistant', content: response.content });
+    messages.push({ role: 'assistant' as const, content: response.content as Anthropic.ContentBlockParam[] });
     messages.push({
-      role: 'user',
+      role: 'user' as const,
       content: `The extraction has validation errors. Please fix these specific issues and re-extract:
 
 ${retryableErrorMessages}
@@ -233,6 +271,7 @@ Re-extract the document with these corrections. The original document is in the 
 
     console.log('  Retrying with error feedback...');
   }
+  return undefined;
 }
 
 // ─── Self-Correction Demonstration ──────────────────────────────────────────
@@ -294,7 +333,7 @@ Monthly Fee: $5,000
 Total Contract Value: $60,000`;
 
   const cleanResult = await extractWithRetry(cleanDoc, 'clean-contract');
-  console.log(`\nResult: ${cleanResult.status} in ${cleanResult.attempts} attempt(s)`);
+  console.log(`\nResult: ${cleanResult?.status} in ${cleanResult?.attempts} attempt(s)`);
 
   // ── Test 2: Sparse document (non-retryable missing fields) ────────
   const sparseDoc = `Quick Mart
@@ -302,7 +341,7 @@ Total: $23.47
 Cash`;
 
   const sparseResult = await extractWithRetry(sparseDoc, 'sparse-receipt');
-  console.log(`\nResult: ${sparseResult.status} in ${sparseResult.attempts} attempt(s)`);
+  console.log(`\nResult: ${sparseResult?.status} in ${sparseResult?.attempts} attempt(s)`);
 
   // ── Test 3: Self-correction demonstration ─────────────────────────
   await demonstrateSelfCorrection();
@@ -313,12 +352,12 @@ Cash`;
   console.log('='.repeat(60));
 
   const allErrors = [
-    ...(cleanResult.errorLog || []),
-    ...(sparseResult.errorLog || []),
+    ...(cleanResult?.errorLog || []),
+    ...(sparseResult?.errorLog || []),
   ];
 
   if (allErrors.length > 0) {
-    const patternStats = {};
+    const patternStats: Record<string, Record<string, number>> = {};
     for (const err of allErrors) {
       if (!patternStats[err.pattern]) {
         patternStats[err.pattern] = { total: 0, retryable: 0, non_retryable: 0 };

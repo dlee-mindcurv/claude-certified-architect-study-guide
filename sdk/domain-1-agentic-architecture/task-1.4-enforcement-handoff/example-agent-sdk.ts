@@ -14,14 +14,15 @@
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback, PreToolUseHookInput, PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { csrServer } from '../../../shared/tools/csr-tools.js';
 import { csrSystemPrompt } from '../../../shared/prompts/csr-system-prompt.js';
 
 // ─── Prerequisite Gate State ───────────────────────────────────────────────
 // Track which tools have been called successfully in this conversation.
 
-const completedTools = new Set();
-let verifiedCustomerId = null;
+const completedTools = new Set<string>();
+let verifiedCustomerId: string | null = null;
 
 // ─── PreToolUse Hook: Prerequisite Gate ─────────────────────────────────────
 //
@@ -29,11 +30,12 @@ let verifiedCustomerId = null;
 // If prerequisites are not met, it returns a 'deny' permission decision,
 // which blocks the tool call and returns an error to Claude.
 
-async function prerequisiteGateHook(input) {
+const prerequisiteGateHook: HookCallback = async (_input) => {
+  const input = _input as PreToolUseHookInput;
   const toolName = input.tool_name;
 
   // Define prerequisite requirements
-  const gates = {
+  const gates: Record<string, { requires: string[]; errorMessage: string }> = {
     mcp__csr__process_refund: {
       requires: ['mcp__csr__get_customer', 'mcp__csr__lookup_order'],
       errorMessage: 'Cannot process refund without first verifying customer (get_customer) and order (lookup_order).',
@@ -64,29 +66,31 @@ async function prerequisiteGateHook(input) {
   }
 
   // Additional: customer_id consistency check
-  if (verifiedCustomerId && input.tool_input?.customer_id && input.tool_input.customer_id !== verifiedCustomerId) {
+  const toolInput = input.tool_input as Record<string, unknown> | undefined;
+  if (verifiedCustomerId && toolInput?.customer_id && toolInput.customer_id !== verifiedCustomerId) {
     return {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: `CONSISTENCY GATE: Customer ID mismatch. Verified: ${verifiedCustomerId}, received: ${input.tool_input.customer_id}.`,
+        permissionDecisionReason: `CONSISTENCY GATE: Customer ID mismatch. Verified: ${verifiedCustomerId}, received: ${toolInput?.customer_id}.`,
       },
     };
   }
 
   console.log(`  [GATE PASSED] ${toolName}`);
-  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
-}
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'allow' as const } };
+};
 
 // ─── PostToolUse Hook: Track Completed Tools ────────────────────────────────
 
-async function trackCompletedToolsHook(input) {
+const trackCompletedToolsHook: HookCallback = async (_input) => {
+  const input = _input as PostToolUseHookInput;
   const toolName = input.tool_name;
 
   // Parse output to check for errors
   let isError = false;
   try {
-    const output = JSON.parse(input.tool_output);
+    const output = JSON.parse(input.tool_response as string);
     isError = !!output.errorCategory;
   } catch { /* non-JSON output */ }
 
@@ -97,7 +101,7 @@ async function trackCompletedToolsHook(input) {
     // Capture verified customer ID for consistency checks
     if (toolName === 'mcp__csr__get_customer') {
       try {
-        const result = JSON.parse(input.tool_output);
+        const result = JSON.parse(input.tool_response as string);
         if (result.id) {
           verifiedCustomerId = result.id;
           console.log(`  [VERIFIED] Customer ID: ${verifiedCustomerId}`);
@@ -107,11 +111,11 @@ async function trackCompletedToolsHook(input) {
   }
 
   return {};
-}
+};
 
 // ─── Run Agent with Enforcement Hooks ───────────────────────────────────────
 
-async function runEnforcedAgent(userMessage) {
+async function runEnforcedAgent(userMessage: string): Promise<string> {
   console.log('\n' + '='.repeat(60));
   console.log('CSR Agent with Programmatic Enforcement (Agent SDK)');
   console.log('='.repeat(60));

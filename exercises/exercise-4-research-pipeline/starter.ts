@@ -48,7 +48,7 @@ const subagents = {
 // invoke subagents. It passes context EXPLICITLY — subagents don't
 // inherit the coordinator's conversation history.
 
-async function runResearch(topic) {
+async function runResearch(topic: string) {
   console.log(`\nResearch Topic: ${topic}\n`);
 
   // TODO 2: Call query() with:

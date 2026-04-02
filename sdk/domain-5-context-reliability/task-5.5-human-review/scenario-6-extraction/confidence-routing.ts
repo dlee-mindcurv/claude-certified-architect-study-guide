@@ -35,7 +35,7 @@ export const ROUTING_CONFIG = {
     contract: ['parties', 'effective_date', 'term'],
     research_paper: ['title', 'authors'],
     receipt: ['total'],
-  },
+  } as Record<string, string[]>,
   financialFields: [
     'total', 'stated_total', 'calculated_total',
     'subtotal', 'tax', 'monthly_fee', 'amount',
@@ -51,15 +51,53 @@ export const ROUTING_REASONS = {
   AMBIGUOUS_SOURCE: 'ambiguous_source',
   CROSS_FIELD_MISMATCH: 'cross_field_mismatch',
   NULL_VALUE_LOW_CONFIDENCE: 'null_value_low_confidence',
-};
+} as const;
+
+type RoutingReason = typeof ROUTING_REASONS[keyof typeof ROUTING_REASONS];
+
+interface FieldData {
+  value: unknown;
+  confidence: number;
+  source: string | null;
+}
+
+interface Extraction {
+  documentId: string;
+  documentType: string;
+  fields: Record<string, FieldData>;
+}
+
+interface ReviewField {
+  field: string;
+  value: unknown;
+  confidence: number;
+  reason: RoutingReason | string;
+  source?: string | null;
+}
+
+interface AcceptedField {
+  field: string;
+  value: unknown;
+  confidence: number;
+}
+
+interface RoutingDecision {
+  documentId: string;
+  documentType: string;
+  route: string;
+  reasons: string[];
+  fieldsForReview: ReviewField[];
+  fieldsAccepted: AcceptedField[];
+  reviewPriority: string;
+}
 
 /**
  * EXAM KEY CONCEPT: Routing is per-FIELD, not per-document. A document
  * might have 8 fields where 7 pass and 1 fails. The whole document goes
  * to review, but the reviewer knows exactly which field to check.
  */
-export function routeExtraction(extraction) {
-  const decision = {
+export function routeExtraction(extraction: Extraction): RoutingDecision {
+  const decision: RoutingDecision = {
     documentId: extraction.documentId,
     documentType: extraction.documentType,
     route: 'auto_accept',
@@ -72,7 +110,7 @@ export function routeExtraction(extraction) {
   const required = ROUTING_CONFIG.requiredFields[extraction.documentType] || [];
 
   for (const [fieldName, fieldData] of Object.entries(extraction.fields)) {
-    const checks = [];
+    const checks: Array<{ reason: RoutingReason; detail: string }> = [];
 
     // Check 1: Missing required field
     if (required.includes(fieldName) && fieldData.value === null) {
@@ -115,7 +153,7 @@ export function routeExtraction(extraction) {
   }
 
   // Set priority
-  if (decision.fieldsForReview.some(f => f.reason === ROUTING_REASONS.MISSING_REQUIRED || f.reason === ROUTING_REASONS.CROSS_FIELD_MISMATCH)) {
+  if (decision.fieldsForReview.some((f: ReviewField) => f.reason === ROUTING_REASONS.MISSING_REQUIRED || f.reason === ROUTING_REASONS.CROSS_FIELD_MISMATCH)) {
     decision.reviewPriority = 'high';
   } else if (decision.fieldsForReview.length >= 3) {
     decision.reviewPriority = 'high';
@@ -124,16 +162,16 @@ export function routeExtraction(extraction) {
   return decision;
 }
 
-function getThreshold(fieldName, requiredFields) {
+function getThreshold(fieldName: string, requiredFields: string[]): number {
   if (ROUTING_CONFIG.financialFields.includes(fieldName)) return ROUTING_CONFIG.thresholds.financial;
   if (requiredFields.includes(fieldName)) return ROUTING_CONFIG.thresholds.required;
   return ROUTING_CONFIG.thresholds.standard;
 }
 
-function checkCrossFieldConsistency(fields) {
+function checkCrossFieldConsistency(fields: Record<string, FieldData>): { detail: string; values: { stated: unknown; calculated: unknown } } | null {
   if (fields.stated_total && fields.calculated_total) {
-    const stated = fields.stated_total.value;
-    const calculated = fields.calculated_total.value;
+    const stated = fields.stated_total.value as number;
+    const calculated = fields.calculated_total.value as number;
     if (stated !== null && calculated !== null && Math.abs(stated - calculated) > 0.01) {
       return { detail: `Total mismatch: stated $${stated} vs calculated $${calculated}`, values: { stated, calculated } };
     }
@@ -143,8 +181,20 @@ function checkCrossFieldConsistency(fields) {
 
 // ─── Stratified Sampling ─────────────────────────────────────────────────────
 
+interface StratumDoc {
+  docId: string;
+  value: unknown;
+  confidence: number;
+}
+
 export class Stratum {
-  constructor(documentType, field) {
+  documentType: string;
+  field: string;
+  key: string;
+  documents: StratumDoc[];
+  sampleSize: number;
+
+  constructor(documentType: string, field: string) {
     this.documentType = documentType;
     this.field = field;
     this.key = `${documentType}:${field}`;
@@ -152,7 +202,7 @@ export class Stratum {
     this.sampleSize = 0;
   }
 
-  addDocument(docId, value, confidence) { this.documents.push({ docId, value, confidence }); }
+  addDocument(docId: string, value: unknown, confidence: number) { this.documents.push({ docId, value, confidence }); }
   get totalCount() { return this.documents.length; }
 }
 
@@ -160,14 +210,14 @@ export class Stratum {
  * EXAM KEY CONCEPT: Sample by document_type + field, not randomly. This
  * ensures rare but high-risk segments get adequate sample sizes.
  */
-export function generateSamplingPlan(extractions, targetPerStratum = 50) {
-  const strata = new Map();
+export function generateSamplingPlan(extractions: Extraction[], targetPerStratum = 50): { strata: Stratum[]; totalStrata: number; totalSamples: number } {
+  const strata = new Map<string, Stratum>();
 
   for (const extraction of extractions) {
     for (const [fieldName, fieldData] of Object.entries(extraction.fields)) {
       const key = `${extraction.documentType}:${fieldName}`;
       if (!strata.has(key)) strata.set(key, new Stratum(extraction.documentType, fieldName));
-      strata.get(key).addDocument(extraction.documentId, fieldData.value, fieldData.confidence);
+      strata.get(key)!.addDocument(extraction.documentId, fieldData.value, fieldData.confidence);
     }
   }
 
@@ -176,13 +226,25 @@ export function generateSamplingPlan(extractions, targetPerStratum = 50) {
   }
 
   const arr = Array.from(strata.values());
-  return { strata: arr, totalStrata: arr.length, totalSamples: arr.reduce((s, x) => s + x.sampleSize, 0) };
+  return { strata: arr, totalStrata: arr.length, totalSamples: arr.reduce((s: number, x: Stratum) => s + x.sampleSize, 0) };
 }
 
 // ─── Segment Accuracy Analyzer ──────────────────────────────────────────────
 
-export function analyzeSegmentAccuracy(samplingPlan, groundTruth = {}) {
-  return samplingPlan.strata.map(stratum => {
+interface SegmentResult {
+  key: string;
+  documentType: string;
+  field: string;
+  totalCount: number;
+  correct: number;
+  incorrect: number;
+  errorRate: number | null;
+  meetsThreshold: boolean;
+  recommendation: string;
+}
+
+export function analyzeSegmentAccuracy(samplingPlan: { strata: Stratum[] }, groundTruth: Record<string, Record<string, unknown>> = {}): SegmentResult[] {
+  return samplingPlan.strata.map((stratum: Stratum) => {
     let correct = 0, incorrect = 0, unverifiable = 0;
 
     for (const doc of stratum.documents) {
@@ -204,7 +266,7 @@ export function analyzeSegmentAccuracy(samplingPlan, groundTruth = {}) {
   });
 }
 
-function getAutomationRecommendation(errorRate) {
+function getAutomationRecommendation(errorRate: number | null): string {
   if (errorRate === null) return 'INSUFFICIENT DATA: Need labeled validation data';
   if (errorRate <= 0.02) return 'AUTOMATE: Very low error rate';
   if (errorRate <= ROUTING_CONFIG.automationThreshold) return 'AUTOMATE: Within threshold';
@@ -218,11 +280,11 @@ function getAutomationRecommendation(errorRate) {
  * EXAM KEY CONCEPT: The report shows segment-level metrics alongside the
  * aggregate, making it clear when aggregate accuracy is misleading.
  */
-export function buildAutomationReport(segmentResults) {
-  const lines = ['# Automation Readiness Report', ''];
+export function buildAutomationReport(segmentResults: SegmentResult[]): string {
+  const lines: string[] = ['# Automation Readiness Report', ''];
 
-  const automatable = segmentResults.filter(s => s.meetsThreshold);
-  const needsReview = segmentResults.filter(s => !s.meetsThreshold && s.errorRate !== null);
+  const automatable = segmentResults.filter((s: SegmentResult) => s.meetsThreshold);
+  const needsReview = segmentResults.filter((s: SegmentResult) => !s.meetsThreshold && s.errorRate !== null);
 
   lines.push('## Summary');
   lines.push(`- Segments ready for automation: ${automatable.length}/${segmentResults.length}`);
@@ -244,7 +306,7 @@ async function main() {
   console.log('Scenario 6: Extraction Confidence Routing');
   console.log('='.repeat(60));
 
-  const extractions = [
+  const extractions: Extraction[] = [
     {
       documentId: 'inv-001', documentType: 'invoice',
       fields: {

@@ -120,7 +120,7 @@ export const devtoolsServer = createSdkMcpServer({
 
 // ─── Demonstration ────────────────────────────────────────────────────────
 
-async function demonstrate() {
+async function demonstrate(): Promise<void> {
   console.log('Scenario 4: Dev Productivity MCP Server\n');
 
   console.log('MCP Server: devtools (v1.0.0)');
@@ -141,11 +141,11 @@ async function demonstrate() {
       mcpServers: [devtoolsServer],
       maxTurns: 8,
       hooks: {
-        postToolUse: async ({ toolName, toolInput }) => {
+        postToolUse: async ({ toolName, toolInput }: { toolName: string; toolInput: unknown }) => {
           console.log(`  Tool: ${toolName}(${JSON.stringify(toolInput)})`);
         },
       },
-    },
+    } as any,
   })) {
     if (message.type === 'result' && message.subtype === 'success') {
       console.log(`\n  Result: ${message.result.substring(0, 300)}...`);

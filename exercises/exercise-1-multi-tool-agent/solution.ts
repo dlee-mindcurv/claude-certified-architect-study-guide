@@ -8,6 +8,7 @@
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { csrServer } from '../../shared/tools/csr-tools.js';
 
 const REFUND_THRESHOLD = 100;
@@ -17,7 +18,8 @@ const REFUND_THRESHOLD = 100;
 // EXAM KEY CONCEPT: Hooks are deterministic — the model CANNOT bypass them.
 // This is unlike prompt instructions which are probabilistic.
 
-async function refundGuardHook(input, toolUseID, { signal }) {
+const refundGuardHook: HookCallback = async (_input) => {
+  const input = _input as { tool_input?: { amount?: number }; [key: string]: unknown };
   const amount = input.tool_input?.amount;
   if (typeof amount === 'number' && amount > REFUND_THRESHOLD) {
     console.log(`  [HOOK] Blocked refund $${amount} (limit: $${REFUND_THRESHOLD})`);
@@ -32,11 +34,11 @@ async function refundGuardHook(input, toolUseID, { signal }) {
     };
   }
   return {}; // allow
-}
+};
 
 // ─── Run Agent ─────────────────────────────────────────────────────────────
 
-async function runAgent(userMessage) {
+async function runAgent(userMessage: string) {
   console.log(`\nCustomer: ${userMessage}\n`);
 
   for await (const message of query({

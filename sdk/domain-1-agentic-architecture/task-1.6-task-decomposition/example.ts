@@ -23,9 +23,43 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface PRFile {
+  filename: string;
+  diff: string;
+}
+
+interface FileReviewIssue {
+  severity: string;
+  line_context: string;
+  description: string;
+  suggestion: string;
+}
+
+interface FileReviewResult {
+  filename: string;
+  issues: FileReviewIssue[];
+  summary: string;
+  parseError?: boolean;
+}
+
+interface CrossFileIssue {
+  severity: string;
+  files_involved: string[];
+  description: string;
+  suggestion: string;
+}
+
+interface CrossFileResult {
+  cross_file_issues: CrossFileIssue[];
+  overall_assessment: string;
+  summary: string;
+}
+
 // ─── Sample Code Change (Multi-File PR) ─────────────────────────────────────
 
-const pullRequestFiles = [
+const pullRequestFiles: PRFile[] = [
   {
     filename: 'src/api/orders.js',
     diff: `
@@ -128,7 +162,7 @@ Be thorough. If there are no issues, return an empty issues array.`;
  * Analyze a single file using query().
  * Each file gets its own call so Claude applies full attention to it.
  */
-async function analyzeFile(file) {
+async function analyzeFile(file: PRFile): Promise<FileReviewResult> {
   let result = '{}';
 
   for await (const message of query({
@@ -154,7 +188,7 @@ async function analyzeFile(file) {
  * Run per-file analysis for all files in parallel.
  * Each call is independent, so parallelism reduces total latency.
  */
-async function runPerFileAnalysis(files) {
+async function runPerFileAnalysis(files: PRFile[]): Promise<FileReviewResult[]> {
   console.log(`Stage 1: Analyzing ${files.length} files individually...\n`);
   const results = await Promise.all(files.map(analyzeFile));
   for (const result of results) {
@@ -188,7 +222,7 @@ Return JSON:
   "summary": "<overall PR summary>"
 }`;
 
-async function runCrossFileIntegration(perFileResults) {
+async function runCrossFileIntegration(perFileResults: FileReviewResult[]): Promise<CrossFileResult> {
   console.log('\nStage 2: Cross-file integration analysis...\n');
 
   let result = '{}';
@@ -217,7 +251,7 @@ async function runCrossFileIntegration(perFileResults) {
 
 // ─── Pipeline Orchestrator ──────────────────────────────────────────────────
 
-async function reviewPullRequest(files) {
+async function reviewPullRequest(files: PRFile[]) {
   console.log(`=== Code Review Pipeline: ${files.length} files ===\n`);
 
   // Stage 1: Per-file analysis (parallel)

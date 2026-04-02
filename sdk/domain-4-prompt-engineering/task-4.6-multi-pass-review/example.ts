@@ -96,11 +96,11 @@ export function sanitizeHtml(html) {
 // EXAM KEY CONCEPT: Each file is reviewed in a SEPARATE query() call.
 // This ensures session isolation per file and enables parallelization.
 
-async function phase1PerFileAnalysis(files) {
+async function phase1PerFileAnalysis(files: Record<string, string>) {
   console.log('Phase 1: Per-File Local Analysis');
   console.log('─'.repeat(40));
 
-  const perFileResults = {};
+  const perFileResults: Record<string, { findings?: unknown[]; parseError?: boolean }> = {};
 
   // ── Review each file in a separate query() call ────────────────────
   // EXAM KEY CONCEPT: Separate query() calls = session isolation per file
@@ -126,7 +126,7 @@ Return findings as JSON: { "findings": [...], "file": "${filePath}" }`;
 
     try {
       const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
-      const result = JSON.parse(jsonMatch[1].trim());
+      const result = JSON.parse(jsonMatch[1]!.trim()) as { findings?: unknown[] };
       perFileResults[filePath] = result;
       console.log(`  Found ${result.findings?.length || 0} issues in ${filePath}`);
     } catch {
@@ -146,7 +146,7 @@ Return findings as JSON: { "findings": [...], "file": "${filePath}" }`;
 // EXAM KEY CONCEPT: This pass receives per-file results (not raw code) and
 // focuses on issues that span file boundaries.
 
-async function phase2CrossFileAnalysis(perFileResults, files) {
+async function phase2CrossFileAnalysis(perFileResults: Record<string, { findings?: unknown[]; parseError?: boolean }>, files: Record<string, string>) {
   console.log('\nPhase 2: Cross-File Integration Analysis');
   console.log('─'.repeat(40));
 
@@ -180,7 +180,7 @@ Return ONLY cross-file findings as JSON: { "cross_file_findings": [...] }`;
 
   try {
     const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
-    const result = JSON.parse(jsonMatch[1].trim());
+    const result = JSON.parse(jsonMatch[1]!.trim()) as { cross_file_findings?: unknown[] };
     console.log(`  Found ${result.cross_file_findings?.length || 0} cross-file issues`);
     return result;
   } catch {
@@ -195,7 +195,7 @@ Return ONLY cross-file findings as JSON: { "cross_file_findings": [...] }`;
 // access to the reasoning that produced the findings. This is the session
 // isolation principle applied via separate query() calls.
 
-async function phase3Verification(allFindings, files) {
+async function phase3Verification(allFindings: Record<string, unknown>, files: Record<string, string>) {
   console.log('\nPhase 3: Independent Verification');
   console.log('─'.repeat(40));
   console.log('  (Separate query() call -- no shared context with Phases 1-2)');
@@ -243,7 +243,7 @@ Return JSON:
 
   try {
     const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
-    const result = JSON.parse(jsonMatch[1].trim());
+    const result = JSON.parse(jsonMatch[1]!.trim()) as { verified_findings?: unknown[]; summary?: Record<string, number> };
     const summary = result.summary || {};
     console.log(
       `  Confirmed: ${summary.confirmed || 0}, Adjusted: ${summary.adjusted || 0}, Rejected: ${summary.rejected || 0}`
@@ -282,7 +282,7 @@ async function main() {
   console.log('='.repeat(60));
 
   let totalPerFile = 0;
-  for (const result of Object.values(perFileResults)) {
+  for (const result of Object.values(perFileResults) as Array<{ findings?: unknown[] }>) {
     totalPerFile += result.findings?.length || 0;
   }
 

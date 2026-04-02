@@ -18,6 +18,48 @@ import Anthropic from '@anthropic-ai/sdk';
 import { documentExtractionTool } from '../../../../shared/schemas/extraction-output.js';
 import { getDocumentIds, getDocument } from '../../../../shared/tools/extraction-tools.js';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface BatchRequest {
+  custom_id: string;
+  params: Anthropic.MessageCreateParamsNonStreaming;
+}
+
+interface ExtractionData {
+  document_type?: string;
+  date?: string | null;
+  field_confidence?: Record<string, number>;
+  monetary_values?: Array<{
+    label: string;
+    stated_value?: number | null;
+    calculated_value?: number | null;
+    conflict_detected?: boolean;
+    [key: string]: unknown;
+  }>;
+  [key: string]: unknown;
+}
+
+interface SucceededResult {
+  custom_id: string;
+  document_id: string;
+  extraction: ExtractionData | null;
+  validation_issues: string[];
+  status: string;
+  retry_method?: string;
+}
+
+interface FailedResult {
+  custom_id: string;
+  document_id: string;
+  error: unknown;
+}
+
+interface BatchResults {
+  succeeded: SucceededResult[];
+  failed: FailedResult[];
+  expired: Array<{ custom_id: string; document_id: string }>;
+}
+
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 const client = new Anthropic();
@@ -33,10 +75,10 @@ const REALTIME_RETRY_THRESHOLD = 3;
  * EXAM KEY CONCEPT: Each request has a custom_id that is returned in results.
  * This is the ONLY way to correlate batch results to source documents.
  */
-function buildBatchRequests() {
+function buildBatchRequests(): BatchRequest[] {
   const documentIds = getDocumentIds();
   const batchTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const requests = [];
+  const requests: BatchRequest[] = [];
 
   for (const docId of documentIds) {
     const doc = getDocument(docId);
@@ -49,11 +91,11 @@ function buildBatchRequests() {
         max_tokens: 2048,
         // ── Forced tool selection: guaranteed structured output ────
         // EXAM NOTE: tool_choice and tools ARE supported in batch
-        tools: [documentExtractionTool],
-        tool_choice: { type: 'tool', name: 'extract_document_info' },
+        tools: [documentExtractionTool] as Anthropic.Messages.Tool[],
+        tool_choice: { type: 'tool' as const, name: 'extract_document_info' },
         messages: [
           {
-            role: 'user',
+            role: 'user' as const,
             content: `You are extracting structured data from documents. The document_id is "${docId}".
 
 Rules:
@@ -76,7 +118,7 @@ ${doc.raw}`,
 
 // ─── Phase 2: Submit Batch ──────────────────────────────────────────────────
 
-async function submitBatch(requests) {
+async function submitBatch(requests: BatchRequest[]) {
   console.log(`Submitting batch of ${requests.length} extraction requests...\n`);
 
   const batch = await client.messages.batches.create({ requests });
@@ -91,7 +133,7 @@ async function submitBatch(requests) {
 
 // ─── Phase 3: Poll for Completion ───────────────────────────────────────────
 
-async function waitForCompletion(batchId) {
+async function waitForCompletion(batchId: string) {
   console.log(`\nWaiting for batch ${batchId}...\n`);
   const startTime = Date.now();
   let lastStatus = '';
@@ -126,14 +168,14 @@ async function waitForCompletion(batchId) {
 
 // ─── Phase 4: Process Results ───────────────────────────────────────────────
 
-async function collectResults(batchId) {
+async function collectResults(batchId: string) {
   console.log(`\nCollecting results for batch ${batchId}...\n`);
 
-  const succeeded = [];
-  const failed = [];
-  const expired = [];
+  const succeeded: SucceededResult[] = [];
+  const failed: FailedResult[] = [];
+  const expired: Array<{ custom_id: string; document_id: string }> = [];
 
-  for await (const result of client.messages.batches.results(batchId)) {
+  for await (const result of await client.messages.batches.results(batchId)) {
     const customId = result.custom_id;
     const docIdMatch = customId.match(/^extract-(.+?)-\d{4}/);
     const docId = docIdMatch ? docIdMatch[1] : customId;
@@ -141,10 +183,10 @@ async function collectResults(batchId) {
     switch (result.result.type) {
       case 'succeeded': {
         const message = result.result.message;
-        const toolUse = message.content.find(b => b.type === 'tool_use');
-        const extraction = toolUse ? toolUse.input : null;
+        const toolUse = message.content.find((b: Anthropic.Messages.ContentBlock) => b.type === 'tool_use');
+        const extraction: ExtractionData | null = toolUse && 'input' in toolUse ? toolUse.input as ExtractionData : null;
 
-        const validationIssues = [];
+        const validationIssues: string[] = [];
         if (extraction) {
           if (!extraction.document_type) validationIssues.push('missing document_type');
           if (!extraction.field_confidence) validationIssues.push('missing field_confidence');
@@ -180,7 +222,7 @@ async function collectResults(batchId) {
           document_id: docId,
           error: result.result.error,
         });
-        console.log(`  [ERROR] ${docId}: ${result.result.error?.message || 'unknown'}`);
+        console.log(`  [ERROR] ${docId}: ${(result.result.error as { error?: { message?: string } })?.error?.message || 'unknown'}`);
         break;
 
       case 'expired':
@@ -199,36 +241,36 @@ async function collectResults(batchId) {
 
 // ─── Phase 5: Resubmit Failures ────────────────────────────────────────────
 
-async function resubmitFailures(failedItems, originalRequests) {
+async function resubmitFailures(failedItems: Array<{ custom_id: string; document_id: string }>, originalRequests: BatchRequest[]) {
   if (failedItems.length === 0) return [];
 
   console.log(`\nResubmitting ${failedItems.length} failed items...`);
 
-  const failedCustomIds = new Set(failedItems.map(f => f.custom_id));
-  const failedRequests = originalRequests.filter(r => failedCustomIds.has(r.custom_id));
+  const failedCustomIds = new Set(failedItems.map((f: { custom_id: string }) => f.custom_id));
+  const failedRequests = originalRequests.filter((r: BatchRequest) => failedCustomIds.has(r.custom_id));
 
   if (failedItems.length <= REALTIME_RETRY_THRESHOLD) {
     console.log('  Using real-time API (small failure count)\n');
-    const retryResults = [];
+    const retryResults: Array<{ custom_id: string; extraction: unknown; retry_method: string; status: string; error?: string }> = [];
 
     for (const req of failedRequests) {
       try {
         const response = await client.messages.create(req.params);
-        const toolUse = response.content.find(b => b.type === 'tool_use');
+        const toolUse = response.content.find((b: Anthropic.Messages.ContentBlock) => b.type === 'tool_use');
         retryResults.push({
           custom_id: req.custom_id,
-          extraction: toolUse ? toolUse.input : null,
+          extraction: toolUse && 'input' in toolUse ? toolUse.input : null,
           retry_method: 'realtime',
           status: 'success',
         });
         console.log(`  Retry OK: ${req.custom_id}`);
-      } catch (err) {
+      } catch (err: unknown) {
         retryResults.push({
           custom_id: req.custom_id,
           extraction: null,
           retry_method: 'realtime',
           status: 'failed',
-          error: err.message,
+          error: err instanceof Error ? err.message : String(err),
         });
         console.log(`  Retry FAILED: ${req.custom_id}`);
       }
@@ -251,14 +293,14 @@ async function resubmitFailures(failedItems, originalRequests) {
 
 // ─── Phase 6: Pipeline Report ───────────────────────────────────────────────
 
-function generateReport(results, elapsedMs, retryResults) {
+function generateReport(results: BatchResults, elapsedMs: number, retryResults: unknown[]) {
   console.log('\n' + '='.repeat(60));
   console.log('BATCH EXTRACTION PIPELINE REPORT');
   console.log('='.repeat(60));
 
   const totalDocs = results.succeeded.length + results.failed.length + results.expired.length;
-  const cleanExtractions = results.succeeded.filter(r => r.status === 'clean').length;
-  const issueExtractions = results.succeeded.filter(r => r.status === 'has_issues').length;
+  const cleanExtractions = results.succeeded.filter((r: SucceededResult) => r.status === 'clean').length;
+  const issueExtractions = results.succeeded.filter((r: SucceededResult) => r.status === 'has_issues').length;
 
   console.log(`
 Documents processed:     ${totalDocs}
@@ -271,12 +313,12 @@ Processing time:         ${Math.round(elapsedMs / 1000)}s
 `);
 
   const conflictsFound = results.succeeded
-    .filter(r => r.extraction?.monetary_values?.some(mv => mv.conflict_detected))
-    .map(r => ({
+    .filter((r: SucceededResult) => r.extraction?.monetary_values?.some((mv: ExtractionData['monetary_values'] extends Array<infer U> | undefined ? U : never) => mv.conflict_detected))
+    .map((r: SucceededResult) => ({
       document_id: r.document_id,
-      conflicts: r.extraction.monetary_values
-        .filter(mv => mv.conflict_detected)
-        .map(mv => `${mv.label}: stated=$${mv.stated_value}, calc=$${mv.calculated_value}`),
+      conflicts: (r.extraction!.monetary_values ?? [])
+        .filter((mv) => mv.conflict_detected)
+        .map((mv) => `${mv.label}: stated=$${mv.stated_value}, calc=$${mv.calculated_value}`),
     }));
 
   if (conflictsFound.length > 0) {

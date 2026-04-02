@@ -26,7 +26,50 @@ import { researchCoordinatorPrompt } from '../../../shared/prompts/research-coor
 // EXAM KEY CONCEPT: Every subagent failure returns a structured object.
 // Generic "error: true" is never enough.
 
-function createErrorContext({ failureType, attemptedQuery, partialResults = [], alternatives = [] }) {
+interface PartialResult {
+  claim: string;
+  source_url?: string;
+  source_name?: string;
+  publication_date?: string;
+  confidence?: string;
+  snippet?: string;
+}
+
+interface ErrorContext {
+  isError: true;
+  failureType: string;
+  attemptedQuery: string;
+  partialResults: PartialResult[];
+  alternatives: string[];
+  timestamp: string;
+  recovery?: RecoveryResult;
+}
+
+interface EmptyResult {
+  isError: false;
+  query: string;
+  results: never[];
+  totalResults: 0;
+  message: string;
+}
+
+interface SuccessResult {
+  isError: false;
+  topic: string;
+  findings: PartialResult[];
+  totalResults: number;
+}
+
+type SubagentResult = ErrorContext | EmptyResult | SuccessResult;
+
+interface RecoveryResult {
+  recovered: boolean;
+  strategy: string;
+  results: PartialResult[];
+  coverageNote: string;
+}
+
+function createErrorContext({ failureType, attemptedQuery, partialResults = [], alternatives = [] }: { failureType: string; attemptedQuery: string; partialResults?: PartialResult[]; alternatives?: string[] }): ErrorContext {
   return {
     isError: true,
     failureType,        // timeout | rate_limit | access_denied | service_unavailable
@@ -42,19 +85,19 @@ function createErrorContext({ failureType, attemptedQuery, partialResults = [], 
  * completed successfully but found nothing. This is fundamentally different
  * from a timeout or service error.
  */
-function createEmptyResult(query) {
+function createEmptyResult(queryStr: string): EmptyResult {
   return {
     isError: false,
-    query,
+    query: queryStr,
     results: [],
     totalResults: 0,
-    message: `No results found for: ${query}`,
+    message: `No results found for: ${queryStr}`,
   };
 }
 
 // ─── Simulated Subagent Execution ────────────────────────────────────────────
 
-async function executeSearchSubagent(topic) {
+async function executeSearchSubagent(topic: string): Promise<SubagentResult> {
   console.log(`\n  [Subagent] Searching: "${topic}"`);
 
   // Simulate timeout with partial results
@@ -81,7 +124,7 @@ async function executeSearchSubagent(topic) {
   }
 
   // Simulate success using query() as a real subagent
-  let findings = [];
+  const findings: PartialResult[] = [];
 
   for await (const message of query({
     prompt: `Search for: "${topic}". Return key findings with sources.`,
@@ -105,7 +148,7 @@ async function executeSearchSubagent(topic) {
 // EXAM KEY CONCEPT: The coordinator inspects the structured error context
 // and makes an intelligent recovery decision -- not a blanket retry or fail.
 
-async function coordinatorRecovery(errorContext) {
+async function coordinatorRecovery(errorContext: ErrorContext): Promise<RecoveryResult> {
   console.log(`\n  [Coordinator] Handling ${errorContext.failureType} error`);
   console.log(`  [Coordinator] Partial results: ${errorContext.partialResults.length}`);
 
@@ -160,34 +203,41 @@ async function coordinatorRecovery(errorContext) {
 // and what has gaps. This prevents the reader from assuming comprehensive
 // coverage when parts of the research failed.
 
-function buildReportWithCoverage(allResults) {
-  const report = {
+interface Report {
+  findings: PartialResult[];
+  coverageAnnotations: { wellSupported: string[]; gaps: string[] };
+}
+
+function buildReportWithCoverage(allResults: SubagentResult[]): Report {
+  const report: Report = {
     findings: [],
     coverageAnnotations: { wellSupported: [], gaps: [] },
   };
 
   for (const result of allResults) {
     if (result.isError) {
-      if (result.recovery?.recovered) {
-        report.findings.push(...result.recovery.results);
-        if (result.recovery.coverageNote) {
-          report.coverageAnnotations.gaps.push(result.recovery.coverageNote);
+      const errorResult = result as ErrorContext;
+      if (errorResult.recovery?.recovered) {
+        report.findings.push(...errorResult.recovery.results);
+        if (errorResult.recovery.coverageNote) {
+          report.coverageAnnotations.gaps.push(errorResult.recovery.coverageNote);
         }
       } else {
         report.coverageAnnotations.gaps.push(
-          result.recovery?.coverageNote || `Failed: ${result.attemptedQuery}`
+          errorResult.recovery?.coverageNote || `Failed: ${errorResult.attemptedQuery}`
         );
       }
-    } else if (result.totalResults === 0) {
+    } else if ('totalResults' in result && result.totalResults === 0) {
       // Valid empty result -- topic gap (not an error)
       report.coverageAnnotations.gaps.push(
-        `No sources found for: "${result.query}". Topic lacks published coverage.`
+        `No sources found for: "${(result as EmptyResult).query}". Topic lacks published coverage.`
       );
     } else {
-      report.findings.push(...(result.findings || []));
-      if ((result.findings || []).length >= 2) {
+      const successResult = result as SuccessResult;
+      report.findings.push(...(successResult.findings || []));
+      if ((successResult.findings || []).length >= 2) {
         report.coverageAnnotations.wellSupported.push(
-          `${result.topic}: ${result.findings.length} sources found`
+          `${successResult.topic}: ${successResult.findings.length} sources found`
         );
       }
     }
@@ -210,14 +260,14 @@ async function main() {
   ];
 
   console.log('\n--- Phase 1: Execute subagent searches ---');
-  const allResults = [];
+  const allResults: SubagentResult[] = [];
 
   for (const topic of topics) {
     const result = await executeSearchSubagent(topic);
 
     if (result.isError) {
       console.log(`\n--- Phase 2: Coordinator recovery for "${topic}" ---`);
-      result.recovery = await coordinatorRecovery(result);
+      (result as ErrorContext).recovery = await coordinatorRecovery(result as ErrorContext);
     }
 
     allResults.push(result);

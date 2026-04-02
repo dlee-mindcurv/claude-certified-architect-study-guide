@@ -16,6 +16,30 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { reviewCriteriaPrompt } from '../../../../shared/prompts/review-criteria.js';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface ReviewFinding {
+  detected_pattern: string;
+  confidence: number;
+  issue: string;
+  [key: string]: unknown;
+}
+
+interface ReviewResult {
+  findings: ReviewFinding[];
+  summary: Record<string, unknown>;
+}
+
+interface FeedbackRecord {
+  detected_pattern: string;
+  is_false_positive: boolean;
+}
+
+interface PatternStats {
+  total: number;
+  false_positives: number;
+}
+
 // ─── Severity Definitions ───────────────────────────────────────────────────
 //
 // EXAM KEY CONCEPT: Each severity level has an explicit definition,
@@ -76,7 +100,7 @@ const SKIP_RULES = [
 
 // ─── Suppressed Patterns ────────────────────────────────────────────────────
 
-const SUPPRESSED_PATTERNS = [
+const SUPPRESSED_PATTERNS: string[] = [
   // 'unused-import',      // Example: suppressed due to 45% FP rate in week 3
   // 'generic-naming',     // Example: suppressed due to 38% FP rate in week 5
 ];
@@ -94,7 +118,7 @@ const CONFIDENCE_THRESHOLD = 0.8;
  * @param {string} codeDiff - The code changes to review
  * @returns {object} Filtered findings with false positive tracking metadata
  */
-async function reviewWithExplicitCriteria(codeDiff) {
+async function reviewWithExplicitCriteria(codeDiff: string) {
   console.log('Running review with explicit criteria...\n');
 
   // ── Step 1: Send code through the review criteria prompt via query() ──
@@ -108,18 +132,18 @@ async function reviewWithExplicitCriteria(codeDiff) {
   }
 
   // ── Step 2: Parse the structured JSON output ────────────────────────
-  let reviewResult;
+  let reviewResult: ReviewResult;
   try {
     const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, rawText];
-    reviewResult = JSON.parse(jsonMatch[1].trim());
+    reviewResult = JSON.parse(jsonMatch[1]!.trim()) as ReviewResult;
   } catch (parseError) {
-    console.error('Failed to parse review output as JSON:', parseError.message);
+    console.error('Failed to parse review output as JSON:', (parseError as Error).message);
     console.log('Raw output:', rawText);
     return { findings: [], summary: null, parseError: true };
   }
 
   // ── Step 3: Filter by confidence threshold ──────────────────────────
-  const confidentFindings = reviewResult.findings.filter(f => {
+  const confidentFindings = reviewResult.findings.filter((f: ReviewFinding) => {
     if (f.confidence < CONFIDENCE_THRESHOLD) {
       console.log(
         `  [FILTERED] Low confidence (${f.confidence}): ${f.detected_pattern} -- ${f.issue}`
@@ -130,7 +154,7 @@ async function reviewWithExplicitCriteria(codeDiff) {
   });
 
   // ── Step 4: Filter suppressed patterns ──────────────────────────────
-  const activeFindings = confidentFindings.filter(f => {
+  const activeFindings = confidentFindings.filter((f: ReviewFinding) => {
     if (SUPPRESSED_PATTERNS.includes(f.detected_pattern)) {
       console.log(
         `  [SUPPRESSED] Pattern "${f.detected_pattern}" is temporarily disabled`
@@ -141,7 +165,7 @@ async function reviewWithExplicitCriteria(codeDiff) {
   });
 
   // ── Step 5: Build tracking metadata ─────────────────────────────────
-  const patternCounts = {};
+  const patternCounts: Record<string, number> = {};
   for (const finding of activeFindings) {
     const pattern = finding.detected_pattern || 'unknown';
     patternCounts[pattern] = (patternCounts[pattern] || 0) + 1;
@@ -170,8 +194,8 @@ async function reviewWithExplicitCriteria(codeDiff) {
  * false positives) and computes per-pattern FP rates. Patterns exceeding
  * the threshold are candidates for suppression.
  */
-function analyzeFalsePositiveRates(feedbackRecords, threshold = 0.3) {
-  const patternStats = {};
+function analyzeFalsePositiveRates(feedbackRecords: FeedbackRecord[], threshold = 0.3) {
+  const patternStats: Record<string, PatternStats> = {};
 
   for (const record of feedbackRecords) {
     const pattern = record.detected_pattern;
@@ -184,8 +208,8 @@ function analyzeFalsePositiveRates(feedbackRecords, threshold = 0.3) {
     }
   }
 
-  const analysis = {};
-  const suppressionCandidates = [];
+  const analysis: Record<string, { total: number; false_positives: number; fp_rate: number; status: string }> = {};
+  const suppressionCandidates: string[] = [];
 
   for (const [pattern, stats] of Object.entries(patternStats)) {
     const fpRate = stats.false_positives / stats.total;

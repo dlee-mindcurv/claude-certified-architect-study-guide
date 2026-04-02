@@ -23,7 +23,7 @@ import {
 
 // ─── Coordinator that Demonstrates Subagent Invocation ─────────────────────
 
-async function demonstrateSubagentInvocation() {
+async function demonstrateSubagentInvocation(): Promise<string> {
   console.log('='.repeat(60));
   console.log('Task 1.3 -- Subagent Invocation Patterns (Agent SDK)');
   console.log('='.repeat(60));

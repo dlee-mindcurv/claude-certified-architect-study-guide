@@ -17,6 +17,22 @@ import {
   synthesisSubagentPrompt,
 } from '../../../../shared/prompts/research-coordinator.js';
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface AgentDefinition {
+  description: string;
+  prompt: string;
+  tools: string[];
+  model: string;
+  maxTurns: number;
+}
+
+interface FindingInput {
+  subtopic: string;
+  source: string;
+  result: string;
+}
+
 // ─── Subagent Definitions ───────────────────────────────────────────────────
 //
 // These objects match the AgentDefinition shape expected by options.agents.
@@ -37,7 +53,7 @@ import {
  * - Verify facts (synthesis-agent's scoped tool)
  * - Communicate with other subagents (only the coordinator routes)
  */
-export const webSearchAgentDef = {
+export const webSearchAgentDef: AgentDefinition = {
   description: 'Searches the web for information on a specific subtopic. Assign distinct subtopics to avoid duplication.',
   prompt: searchSubagentPrompt,
 
@@ -55,7 +71,7 @@ export const webSearchAgentDef = {
  *
  * EXAM CONCEPT: Specialized tool access for a specific role
  */
-export const documentAnalysisAgentDef = {
+export const documentAnalysisAgentDef: AgentDefinition = {
   description: 'Analyzes a specific document by ID and extracts structured findings with evidence and confidence levels.',
   prompt: `You are a document analysis specialist. Your task is to analyze assigned documents and extract structured, cited findings.
 
@@ -87,7 +103,7 @@ Return structured JSON with documentId, title, findings array, and gaps array.
  * verify_fact is a lightweight tool that lets the synthesis agent do
  * simple fact-checks without needing full web_search access.
  */
-export const synthesisAgentDef = {
+export const synthesisAgentDef: AgentDefinition = {
   description: 'Combines findings from search and analysis into a coherent, cited report. Has verify_fact for quick fact-checks.',
   prompt: synthesisSubagentPrompt,
 
@@ -105,7 +121,7 @@ export const synthesisAgentDef = {
 // This makes the system extensible -- adding a new subagent type is a single
 // addition to this object.
 
-export const subagentRegistry = {
+export const subagentRegistry: Record<string, AgentDefinition> = {
   'search-agent': webSearchAgentDef,
   'analysis-agent': documentAnalysisAgentDef,
   'synthesis-agent': synthesisAgentDef,
@@ -115,9 +131,9 @@ export const subagentRegistry = {
  * Build the agents config for query() from the registry.
  * Useful when a coordinator wants all available subagents.
  *
- * @returns {Record<string, AgentDefinition>} agents config for query()
+ * @returns agents config for query()
  */
-export function buildAgentsConfig() {
+export function buildAgentsConfig(): Record<string, AgentDefinition> {
   return { ...subagentRegistry };
 }
 
@@ -130,11 +146,11 @@ export function buildAgentsConfig() {
 /**
  * Build a task description for a search subagent.
  *
- * @param {string} subtopic - What to research
- * @param {string[]} [avoidDuplicating] - Topics already covered by other agents
- * @returns {string} Complete task description
+ * @param subtopic - What to research
+ * @param avoidDuplicating - Topics already covered by other agents
+ * @returns Complete task description
  */
-export function buildSearchTaskDescription(subtopic, avoidDuplicating = []) {
+export function buildSearchTaskDescription(subtopic: string, avoidDuplicating: string[] = []): string {
   let description = `Research this specific subtopic: "${subtopic}"
 
 Search for recent, credible sources (2024-2025 preferred). For each finding:
@@ -155,11 +171,11 @@ Focus EXCLUSIVELY on "${subtopic}".`;
 /**
  * Build a task description for the synthesis subagent.
  *
- * @param {string} originalQuery - The user's original research query
- * @param {Object[]} findings - Array of { subtopic, source, result } objects
- * @returns {string} Complete task description with full context
+ * @param originalQuery - The user's original research query
+ * @param findings - Array of { subtopic, source, result } objects
+ * @returns Complete task description with full context
  */
-export function buildSynthesisTaskDescription(originalQuery, findings) {
+export function buildSynthesisTaskDescription(originalQuery: string, findings: FindingInput[]): string {
   const findingsText = findings
     .map(f => `### ${f.subtopic} (from ${f.source})\n${f.result}`)
     .join('\n\n');

@@ -19,7 +19,7 @@ import { csrSystemPrompt } from '../../../shared/prompts/csr-system-prompt.js';
 
 // ─── Running the Agent with query() ───────────────────────────────────────
 
-async function runCsrAgent(userMessage) {
+async function runCsrAgent(userMessage: string): Promise<string> {
   console.log(`\nUser: ${userMessage}\n`);
 
   // EXAM KEY CONCEPT: query() replaces the manual while(true) loop.

@@ -26,7 +26,67 @@ import { csrSystemPrompt } from '../../../../shared/prompts/csr-system-prompt.js
  * It survives summarization because we re-inject it into the system prompt
  * before every API call.
  */
-export function createCaseFacts() {
+
+interface CaseFactsCustomer {
+  id: string;
+  name: string;
+  email: string;
+  tier: string;
+  accountStatus: string;
+}
+
+interface CaseFactsOrder {
+  orderId: string;
+  customerId: string;
+  total: number;
+  status: string;
+  deliveredAt: string | null;
+  trackingNumber: string | null;
+  itemCount: number;
+  itemNames: string[];
+}
+
+interface CaseFactsAction {
+  action: string;
+  detail: string;
+  turn: number;
+  category?: string;
+  retryable?: boolean;
+}
+
+interface CaseFactsIssue {
+  type: string;
+  description: string;
+  matchCount?: number;
+  turn: number;
+}
+
+interface CaseFactsRefund {
+  refundId: string;
+  orderId: string;
+  amount: number;
+  status: string;
+  estimatedDays: number;
+}
+
+interface CaseFactsEscalation {
+  ticketId: string;
+  priority: string;
+  issueSummary: string;
+  assignedTo: string;
+}
+
+interface CaseFacts {
+  customer: CaseFactsCustomer | null;
+  orders: CaseFactsOrder[];
+  actionsTaken: CaseFactsAction[];
+  openIssues: CaseFactsIssue[];
+  refunds: CaseFactsRefund[];
+  escalations: CaseFactsEscalation[];
+  turnCount: number;
+}
+
+export function createCaseFacts(): CaseFacts {
   return {
     customer: null,
     orders: [],
@@ -47,7 +107,7 @@ export function createCaseFacts() {
  * Intermediate facts (like customer tier discovered during get_customer)
  * inform subsequent decisions (like whether a refund needs approval).
  */
-export function extractFacts(toolName, toolInput, rawResult, caseFacts) {
+export function extractFacts(toolName: string, toolInput: Record<string, unknown>, rawResult: { isError: boolean; content: string }, caseFacts: CaseFacts): CaseFacts {
   caseFacts.turnCount++;
 
   if (rawResult.isError) {
@@ -78,34 +138,35 @@ export function extractFacts(toolName, toolInput, rawResult, caseFacts) {
   }
 }
 
-function extractCustomerFacts(data, toolInput, caseFacts) {
+function extractCustomerFacts(data: Record<string, unknown>, _toolInput: Record<string, unknown>, caseFacts: CaseFacts): CaseFacts {
   if (data.id) {
     caseFacts.customer = {
-      id: data.id,
-      name: data.name,
-      email: data.email,
-      tier: data.tier,
-      accountStatus: data.accountStatus,
+      id: data.id as string,
+      name: data.name as string,
+      email: data.email as string,
+      tier: data.tier as string,
+      accountStatus: data.accountStatus as string,
     };
     caseFacts.actionsTaken.push({
       action: 'Verified customer identity',
       detail: `${data.name} (${data.id}, ${data.tier} tier)`,
       turn: caseFacts.turnCount,
     });
-    caseFacts.openIssues = caseFacts.openIssues.filter(i => i.type !== 'disambiguation');
+    caseFacts.openIssues = caseFacts.openIssues.filter((i: CaseFactsIssue) => i.type !== 'disambiguation');
   }
 
   if (data.multiple_matches) {
-    const matchSummaries = data.multiple_matches.map(m => `${m.name} (${m.id}, ${m.email})`);
+    const matches = data.multiple_matches as Array<{ name: string; id: string; email: string }>;
+    const matchSummaries = matches.map((m: { name: string; id: string; email: string }) => `${m.name} (${m.id}, ${m.email})`);
     caseFacts.openIssues.push({
       type: 'disambiguation',
       description: `Multiple customers match: ${matchSummaries.join('; ')}`,
-      matchCount: data.multiple_matches.length,
+      matchCount: matches.length,
       turn: caseFacts.turnCount,
     });
     caseFacts.actionsTaken.push({
       action: 'Customer lookup returned multiple matches',
-      detail: `${data.multiple_matches.length} matches found, need disambiguation`,
+      detail: `${matches.length} matches found, need disambiguation`,
       turn: caseFacts.turnCount,
     });
   }
@@ -113,19 +174,20 @@ function extractCustomerFacts(data, toolInput, caseFacts) {
   return caseFacts;
 }
 
-function extractOrderFacts(data, caseFacts) {
-  const orderSummary = {
-    orderId: data.orderId,
-    customerId: data.customerId,
-    total: data.total,
-    status: data.status,
-    deliveredAt: data.deliveredAt || null,
-    trackingNumber: data.trackingNumber || null,
-    itemCount: data.items?.length || 0,
-    itemNames: data.items?.map(i => i.name) || [],
+function extractOrderFacts(data: Record<string, unknown>, caseFacts: CaseFacts): CaseFacts {
+  const items = data.items as Array<{ name: string }> | undefined;
+  const orderSummary: CaseFactsOrder = {
+    orderId: data.orderId as string,
+    customerId: data.customerId as string,
+    total: data.total as number,
+    status: data.status as string,
+    deliveredAt: (data.deliveredAt as string) || null,
+    trackingNumber: (data.trackingNumber as string) || null,
+    itemCount: items?.length || 0,
+    itemNames: items?.map((i: { name: string }) => i.name) || [],
   };
 
-  const existingIdx = caseFacts.orders.findIndex(o => o.orderId === data.orderId);
+  const existingIdx = caseFacts.orders.findIndex((o: CaseFactsOrder) => o.orderId === data.orderId);
   if (existingIdx >= 0) {
     caseFacts.orders[existingIdx] = orderSummary;
   } else {
@@ -141,13 +203,13 @@ function extractOrderFacts(data, caseFacts) {
   return caseFacts;
 }
 
-function extractRefundFacts(data, caseFacts) {
+function extractRefundFacts(data: Record<string, unknown>, caseFacts: CaseFacts): CaseFacts {
   caseFacts.refunds.push({
-    refundId: data.refundId,
-    orderId: data.orderId,
-    amount: data.amount,
-    status: data.status,
-    estimatedDays: data.estimatedProcessingDays,
+    refundId: data.refundId as string,
+    orderId: data.orderId as string,
+    amount: data.amount as number,
+    status: data.status as string,
+    estimatedDays: data.estimatedProcessingDays as number,
   });
 
   caseFacts.actionsTaken.push({
@@ -164,16 +226,16 @@ function extractRefundFacts(data, caseFacts) {
     });
   }
 
-  caseFacts.openIssues = caseFacts.openIssues.filter(i => i.type !== 'awaiting_refund');
+  caseFacts.openIssues = caseFacts.openIssues.filter((i: CaseFactsIssue) => i.type !== 'awaiting_refund');
   return caseFacts;
 }
 
-function extractEscalationFacts(data, caseFacts) {
+function extractEscalationFacts(data: Record<string, unknown>, caseFacts: CaseFacts): CaseFacts {
   caseFacts.escalations.push({
-    ticketId: data.ticketId,
-    priority: data.priority,
-    issueSummary: data.issueSummary,
-    assignedTo: data.assignedTo,
+    ticketId: data.ticketId as string,
+    priority: data.priority as string,
+    issueSummary: data.issueSummary as string,
+    assignedTo: data.assignedTo as string,
   });
 
   caseFacts.actionsTaken.push({
@@ -192,8 +254,8 @@ function extractEscalationFacts(data, caseFacts) {
  * in the highest-attention zone. It uses explicit section headers
  * (## Current Case Facts) so Claude can locate it reliably.
  */
-export function renderCaseFacts(caseFacts) {
-  const lines = ['## Current Case Facts (verified this session)', ''];
+export function renderCaseFacts(caseFacts: CaseFacts): string {
+  const lines: string[] = ['## Current Case Facts (verified this session)', ''];
 
   if (caseFacts.customer) {
     const c = caseFacts.customer;
@@ -249,7 +311,7 @@ export function renderCaseFacts(caseFacts) {
  * EXAM KEY CONCEPT: Case facts go BEFORE the base system prompt so they
  * sit at the very top of the context window.
  */
-export function buildSystemPrompt(caseFacts) {
+export function buildSystemPrompt(caseFacts: CaseFacts): string {
   return `${renderCaseFacts(caseFacts)}\n\n---\n\n${csrSystemPrompt}`;
 }
 
@@ -260,7 +322,7 @@ export function buildSystemPrompt(caseFacts) {
  * raw tool result in conversation history does not need all the verbose data.
  * Trimming conserves context window tokens.
  */
-export function trimToolResult(toolName, rawContent) {
+export function trimToolResult(toolName: string, rawContent: string): string {
   try {
     const data = JSON.parse(rawContent);
 

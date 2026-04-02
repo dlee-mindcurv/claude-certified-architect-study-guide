@@ -26,7 +26,32 @@ import { researchCoordinatorPrompt } from '../../../shared/prompts/research-coor
 // EXAM KEY CONCEPT: Every factual claim carries its source. This is the
 // fundamental unit of provenance tracking.
 
-function createClaim({ claim, evidence, sourceUrl, sourceName, publicationDate, confidence, page = null }) {
+interface ClaimSource {
+  url: string;
+  name: string;
+  publicationDate: string;
+  page: number | null;
+}
+
+interface Claim {
+  claim: string;
+  evidence: string;
+  source: ClaimSource;
+  confidence: string;
+  addedAt: string;
+}
+
+interface ClaimInput {
+  claim: string;
+  evidence: string;
+  sourceUrl: string;
+  sourceName: string;
+  publicationDate: string;
+  confidence: string;
+  page?: number | null;
+}
+
+function createClaim({ claim, evidence, sourceUrl, sourceName, publicationDate, confidence, page = null }: ClaimInput): Claim {
   return {
     claim, evidence,
     source: { url: sourceUrl, name: sourceName, publicationDate, page },
@@ -40,7 +65,12 @@ function createClaim({ claim, evidence, sourceUrl, sourceName, publicationDate, 
 // Note: doc-001 and doc-002 report DIFFERENT growth rates for AI art tools.
 // This is an intentional conflict that the synthesis must preserve.
 
-const subagentFindings = {
+interface AgentFindings {
+  topic: string;
+  findings: Claim[];
+}
+
+const subagentFindings: Record<string, AgentFindings> = {
   searchAgent: {
     topic: 'AI in creative industries',
     findings: [
@@ -72,8 +102,21 @@ const subagentFindings = {
 // metric, present BOTH with attribution. Do NOT average, pick one, or
 // synthesize a compromise.
 
-function detectConflicts(allFindings) {
-  const conflicts = [];
+interface ConflictValue {
+  value: string;
+  source: ClaimSource;
+  claim: string;
+}
+
+interface Conflict {
+  metric: string;
+  valueA: ConflictValue;
+  valueB: ConflictValue;
+  possibleExplanation: string;
+}
+
+function detectConflicts(allFindings: AgentFindings[]): Conflict[] {
+  const conflicts: Conflict[] = [];
   const allClaims = allFindings.flatMap(f => f.findings);
 
   for (let i = 0; i < allClaims.length; i++) {
@@ -91,7 +134,7 @@ function detectConflicts(allFindings) {
   return conflicts;
 }
 
-function checkForConflict(claimA, claimB) {
+function checkForConflict(claimA: Claim, claimB: Claim): Conflict | null {
   const numbersA = claimA.claim.match(/(\d+\.?\d*%|\$[\d,.]+[MBK]?)/g) || [];
   const numbersB = claimB.claim.match(/(\d+\.?\d*%|\$[\d,.]+[MBK]?)/g) || [];
 
@@ -104,8 +147,8 @@ function checkForConflict(claimA, claimB) {
   if (overlap.length >= 3 && numbersA[0] !== numbersB[0]) {
     return {
       metric: overlap.join(' '),
-      valueA: { value: numbersA[0], source: claimA.source, claim: claimA.claim },
-      valueB: { value: numbersB[0], source: claimB.source, claim: claimB.claim },
+      valueA: { value: numbersA[0]!, source: claimA.source, claim: claimA.claim },
+      valueB: { value: numbersB[0]!, source: claimB.source, claim: claimB.claim },
       possibleExplanation: claimA.evidence !== claimB.evidence
         ? `Different methodologies: "${claimA.evidence}" vs "${claimB.evidence}"`
         : 'Reason for discrepancy not determined',
@@ -117,7 +160,38 @@ function checkForConflict(claimA, claimB) {
 
 // ─── Synthesis with Provenance Preservation ──────────────────────────────────
 
-function synthesizeWithProvenance(allFindings) {
+interface SynthesizedFinding {
+  claim: string;
+  source: string;
+  sourceUrl: string;
+  publicationDate: string;
+  page: number | null;
+  confidence: string;
+  evidence: string;
+}
+
+interface SynthesizedConflict {
+  metric: string;
+  values: Array<{ value: string; source: string; claim: string; publishedDate: string }>;
+  possibleExplanation: string;
+  resolution: string;
+}
+
+interface SourceEntry {
+  name: string;
+  url: string;
+  publicationDate: string;
+}
+
+interface SynthesizedReport {
+  title: string;
+  generatedAt: string;
+  findings: SynthesizedFinding[];
+  conflicts: SynthesizedConflict[];
+  sources: SourceEntry[];
+}
+
+function synthesizeWithProvenance(allFindings: AgentFindings[]): SynthesizedReport {
   const allClaims = allFindings.flatMap(f => f.findings);
   const conflicts = detectConflicts(allFindings);
 
@@ -142,9 +216,9 @@ function synthesizeWithProvenance(allFindings) {
   };
 }
 
-function getUniqueSourceList(claims) {
-  const seen = new Set();
-  const sources = [];
+function getUniqueSourceList(claims: Claim[]): SourceEntry[] {
+  const seen = new Set<string>();
+  const sources: SourceEntry[] = [];
   for (const claim of claims) {
     const key = `${claim.source.name}|${claim.source.url}`;
     if (!seen.has(key)) {
@@ -155,10 +229,10 @@ function getUniqueSourceList(claims) {
   return sources;
 }
 
-// ─── Report Renderer ────────��────────────────────────────────────────────────
+// ─── Report Renderer ─────────────────────────────────────────────────────────
 
-function renderReport(report) {
-  const lines = [`# ${report.title}`, `Generated: ${report.generatedAt}`, ''];
+function renderReport(report: SynthesizedReport): string {
+  const lines: string[] = [`# ${report.title}`, `Generated: ${report.generatedAt}`, ''];
 
   lines.push('## Key Findings');
   for (const f of report.findings) {
@@ -188,7 +262,7 @@ function renderReport(report) {
   return lines.join('\n');
 }
 
-// ─── Main ���───────────────────────────────���────────────────────────────────────
+// ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log('='.repeat(60));
@@ -197,7 +271,7 @@ async function main() {
 
   // Phase 1: Collect subagent findings
   console.log('\n--- Phase 1: Subagent Findings ---');
-  const allFindings = Object.values(subagentFindings);
+  const allFindings: AgentFindings[] = Object.values(subagentFindings);
 
   for (const agentResult of allFindings) {
     console.log(`\n  Agent: ${agentResult.topic} (${agentResult.findings.length} findings)`);

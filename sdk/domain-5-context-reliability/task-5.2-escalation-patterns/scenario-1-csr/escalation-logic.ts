@@ -31,7 +31,9 @@ export const ESCALATION_REASONS = {
   HIGH_VALUE_REFUND: 'high_value_refund',
   UNABLE_TO_RESOLVE: 'unable_to_resolve',
   MULTIPLE_MATCH: 'multiple_match',
-};
+} as const;
+
+type EscalationReason = typeof ESCALATION_REASONS[keyof typeof ESCALATION_REASONS];
 
 // ─── System Prompt with Complete Escalation Criteria ──────────────────────────
 
@@ -110,7 +112,7 @@ When escalating, use escalate_to_human with:
  * EXAM KEY CONCEPT: Priority is determined by escalation REASON and customer
  * TIER, not by sentiment or urgency language.
  */
-export function determineEscalationPriority(reason, customerTier) {
+export function determineEscalationPriority(reason: EscalationReason, customerTier: string): string {
   if (reason === ESCALATION_REASONS.CUSTOMER_REQUESTED) return 'high';
   if (customerTier === 'platinum') return 'high';
   if (reason === ESCALATION_REASONS.POLICY_EXCEPTION) return 'medium';
@@ -119,22 +121,31 @@ export function determineEscalationPriority(reason, customerTier) {
 
 // ─── Handoff Summary Builder ──────────────────────────────────────────────────
 
+interface HandoffInput {
+  customer: { id: string; name: string } | null;
+  orders: Array<{ orderId: string; total: number; status: string }>;
+  actionsTaken: Array<string | { action: string; detail?: string }>;
+  escalationReason: EscalationReason;
+  customerMessage: string;
+  customerTier: string;
+}
+
 /**
  * EXAM KEY CONCEPT: The handoff summary must contain enough context that
  * the human agent can resolve WITHOUT reading the full transcript.
  */
-export function buildHandoffSummary({ customer, orders, actionsTaken, escalationReason, customerMessage, customerTier }) {
+export function buildHandoffSummary({ customer, orders, actionsTaken, escalationReason, customerMessage, customerTier }: HandoffInput) {
   return {
     customer: customer || { id: 'unknown', name: 'unidentified' },
     issue: {
       summary: customerMessage,
       category: inferCategory(customerMessage),
     },
-    actions_taken: actionsTaken.map(a => ({
+    actions_taken: actionsTaken.map((a: string | { action: string; detail?: string }) => ({
       action: typeof a === 'string' ? a : a.action,
       result: typeof a === 'string' ? 'completed' : (a.detail || 'completed'),
     })),
-    relevant_orders: (orders || []).map(o => ({
+    relevant_orders: (orders || []).map((o: { orderId: string; total: number; status: string }) => ({
       order_id: o.orderId, total: o.total, status: o.status,
     })),
     recommended_action: getRecommendedAction(escalationReason),
@@ -143,7 +154,7 @@ export function buildHandoffSummary({ customer, orders, actionsTaken, escalation
   };
 }
 
-function inferCategory(message) {
+function inferCategory(message: string): string {
   const lower = (message || '').toLowerCase();
   if (lower.includes('refund') || lower.includes('return') || lower.includes('damaged')) return 'return';
   if (lower.includes('price') || lower.includes('billing')) return 'billing';
@@ -151,8 +162,8 @@ function inferCategory(message) {
   return 'other';
 }
 
-function getRecommendedAction(reason) {
-  const actions = {
+function getRecommendedAction(reason: EscalationReason): string {
+  const actions: Record<string, string> = {
     [ESCALATION_REASONS.CUSTOMER_REQUESTED]: 'Customer requested human agent. Review context and assist directly.',
     [ESCALATION_REASONS.POLICY_EXCEPTION]: 'Request falls outside standard policy. Evaluate for exception approval.',
     [ESCALATION_REASONS.UNABLE_TO_RESOLVE]: 'Agent exhausted available resolution paths. Review and determine next steps.',
@@ -163,7 +174,7 @@ function getRecommendedAction(reason) {
 
 // ─── Full Agent with Escalation Tracking ────────────────────────────────────
 
-async function runCsrWithEscalation(userMessage) {
+async function runCsrWithEscalation(userMessage: string) {
   console.log('\n' + '='.repeat(60));
   console.log('Scenario 1: CSR Agent with Escalation Logic');
   console.log('='.repeat(60));
@@ -187,9 +198,9 @@ async function runCsrWithEscalation(userMessage) {
     },
   })) {
     // Track escalation events from tool use messages
-    if (message.type === 'tool_result') {
+    if (message.type === 'tool_use_summary') {
       try {
-        const data = JSON.parse(message.content);
+        const data = JSON.parse(String((message as Record<string, unknown>).content ?? ''));
         if (data.ticketId) {
           escalated = true;
           console.log(`\n  >>> ESCALATION: ${data.ticketId} (${data.priority}) <<<`);

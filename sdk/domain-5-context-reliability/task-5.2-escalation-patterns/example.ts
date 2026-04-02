@@ -87,7 +87,7 @@ When multiple customers match, ask for clarification. Never pick "the most likel
 
 // ─── Run Escalation-Aware Agent via query() ─────────────────────────────────
 
-async function runEscalationAwareAgent(userMessage) {
+async function runEscalationAwareAgent(userMessage: string) {
   console.log('\n' + '='.repeat(60));
   console.log('Task 5.2: Escalation Patterns');
   console.log('='.repeat(60));

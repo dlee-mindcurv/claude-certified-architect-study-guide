@@ -14,14 +14,41 @@
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { csrServer } from '../../../../shared/tools/csr-tools.js';
 import { csrSystemPrompt } from '../../../../shared/prompts/csr-system-prompt.js';
 
 // ─── Workflow Gate Engine ───────────────────────────────────────────────────
 
+interface GateBlockLogEntry {
+  toolName: string;
+  missing: string[];
+  timestamp: string;
+}
+
+interface ToolCallLogEntry {
+  tool: string;
+  success: boolean;
+  timestamp: string;
+}
+
+interface CustomerData {
+  id: string;
+  name: string;
+  email: string;
+  tier: string;
+  [key: string]: unknown;
+}
+
 class WorkflowGateEngine {
+  completedTools: Set<string>;
+  verifiedCustomerId: string | null;
+  verifiedCustomerData: CustomerData | null;
+  toolCallLog: ToolCallLogEntry[];
+  gateBlockLog: GateBlockLogEntry[];
+
   constructor() {
-    this.completedTools = new Set();
+    this.completedTools = new Set<string>();
     this.verifiedCustomerId = null;
     this.verifiedCustomerData = null;
     this.toolCallLog = [];
@@ -29,7 +56,7 @@ class WorkflowGateEngine {
   }
 
   // EXAM CONCEPT: Declarative prerequisite map
-  static GATES = {
+  static GATES: Record<string, { requires: string[] }> = {
     mcp__csr__get_customer: { requires: [] },
     mcp__csr__lookup_order: { requires: ['mcp__csr__get_customer'] },
     mcp__csr__process_refund: { requires: ['mcp__csr__get_customer', 'mcp__csr__lookup_order'] },
@@ -40,8 +67,9 @@ class WorkflowGateEngine {
    * PreToolUse hook callback.
    * Returns HookJSONOutput with permissionDecision 'allow' or 'deny'.
    */
-  createPreToolUseHook() {
-    return async (input) => {
+  createPreToolUseHook(): HookCallback {
+    return async (_input) => {
+      const input = _input as { hook_event_name: string; tool_name: string; tool_input: Record<string, unknown>; tool_response?: string };
       const toolName = input.tool_name;
       const gate = WorkflowGateEngine.GATES[toolName];
 
@@ -64,13 +92,14 @@ class WorkflowGateEngine {
       }
 
       // Customer ID consistency
-      if (this.verifiedCustomerId && input.tool_input?.customer_id &&
-          input.tool_input.customer_id !== this.verifiedCustomerId) {
+      const toolInput = input.tool_input as Record<string, unknown> | undefined;  // already typed via cast above
+      if (this.verifiedCustomerId && toolInput?.customer_id &&
+          toolInput.customer_id !== this.verifiedCustomerId) {
         return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
             permissionDecision: 'deny',
-            permissionDecisionReason: `CONSISTENCY GATE: Expected customer ${this.verifiedCustomerId}, got ${input.tool_input.customer_id}.`,
+            permissionDecisionReason: `CONSISTENCY GATE: Expected customer ${this.verifiedCustomerId}, got ${toolInput?.customer_id}.`,
           },
         };
       }
@@ -84,13 +113,14 @@ class WorkflowGateEngine {
    * PostToolUse hook callback.
    * Tracks successful tool calls for prerequisite state.
    */
-  createPostToolUseHook() {
-    return async (input) => {
+  createPostToolUseHook(): HookCallback {
+    return async (_input) => {
+      const input = _input as { hook_event_name: string; tool_name: string; tool_input: Record<string, unknown>; tool_response?: string };
       const toolName = input.tool_name;
 
       let isError = false;
       try {
-        const output = JSON.parse(input.tool_output);
+        const output = JSON.parse(input.tool_response ?? '');
         isError = !!output.errorCategory;
       } catch { /* non-JSON */ }
 
@@ -99,7 +129,7 @@ class WorkflowGateEngine {
 
         if (toolName === 'mcp__csr__get_customer') {
           try {
-            const data = JSON.parse(input.tool_output);
+            const data = JSON.parse(input.tool_response ?? '');
             if (data.id) {
               this.verifiedCustomerId = data.id;
               this.verifiedCustomerData = data;
@@ -147,7 +177,7 @@ class WorkflowGateEngine {
 
 // ─── CSR Agent with Full Enforcement ────────────────────────────────────────
 
-export async function runCsrAgentWithGates(userMessage) {
+export async function runCsrAgentWithGates(userMessage: string): Promise<{ text: string; gates: WorkflowGateEngine }> {
   console.log('\n' + '='.repeat(70));
   console.log('  CSR AGENT -- Full Workflow with Prerequisite Gates');
   console.log('='.repeat(70));

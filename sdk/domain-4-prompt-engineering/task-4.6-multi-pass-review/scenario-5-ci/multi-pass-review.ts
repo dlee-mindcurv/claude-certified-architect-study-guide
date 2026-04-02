@@ -28,6 +28,41 @@ import {
   crossFileReviewPrompt,
 } from '../../../../shared/prompts/review-criteria.js';
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface Finding {
+  line?: number;
+  severity?: string;
+  category?: string;
+  issue?: string;
+  suggestion?: string;
+  detected_pattern?: string;
+  confidence?: number;
+  source?: string;
+  [key: string]: unknown;
+}
+
+interface PerFileResult {
+  file?: string;
+  findings?: Finding[];
+  parseError?: boolean;
+}
+
+interface VerifiedFinding {
+  original_issue?: string;
+  original_severity?: string;
+  verification_status?: string;
+  adjusted_severity?: string | null;
+  confidence?: number;
+  verification_notes?: string;
+  [key: string]: unknown;
+}
+
+interface VerificationResult {
+  verified_findings: VerifiedFinding[];
+  summary: { total_reviewed?: number; confirmed?: number; adjusted?: number; rejected?: number };
+}
+
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 // Confidence threshold for surfacing findings to developers
@@ -126,12 +161,12 @@ export function generateToken(length = 32) {
 
 // ─── Phase 1: Per-File Local Analysis ───────────────────────────────────────
 
-async function runPhase1(files) {
+async function runPhase1(files: Record<string, string>) {
   console.log('Phase 1: Per-File Local Analysis (parallel)');
   console.log('─'.repeat(50));
 
   const startTime = Date.now();
-  const perFileResults = {};
+  const perFileResults: Record<string, PerFileResult> = {};
 
   const promises = Object.entries(files).map(async ([filePath, content]) => {
     // EXAM KEY CONCEPT: Each file gets its own query() call -- session isolation
@@ -170,7 +205,7 @@ Return structured JSON:
 
     try {
       const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
-      const result = JSON.parse(jsonMatch[1].trim());
+      const result = JSON.parse(jsonMatch[1]!.trim()) as PerFileResult;
       perFileResults[filePath] = result;
       console.log(`  ${filePath}: ${result.findings?.length || 0} findings`);
     } catch {
@@ -189,14 +224,14 @@ Return structured JSON:
 
 // ─── Phase 2: Cross-File Integration ────────────────────────────────────────
 
-async function runPhase2(perFileResults, files) {
+async function runPhase2(perFileResults: Record<string, PerFileResult>, files: Record<string, string>) {
   console.log('Phase 2: Cross-File Integration Analysis');
   console.log('─'.repeat(50));
 
   const startTime = Date.now();
 
   const perFileText = Object.entries(perFileResults)
-    .map(([file, result]) => `### ${file}\n${JSON.stringify(result.findings || [], null, 2)}`)
+    .map(([file, result]: [string, PerFileResult]) => `### ${file}\n${JSON.stringify(result.findings || [], null, 2)}`)
     .join('\n\n');
 
   const prompt_text = crossFileReviewPrompt.replace('{{per_file_results}}', perFileText);
@@ -232,11 +267,11 @@ Return ONLY cross-file findings as JSON:
     }
   }
 
-  let crossFileFindings = [];
+  let crossFileFindings: Finding[] = [];
 
   try {
     const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
-    const result = JSON.parse(jsonMatch[1].trim());
+    const result = JSON.parse(jsonMatch[1]!.trim()) as { cross_file_findings?: Finding[] };
     crossFileFindings = result.cross_file_findings || [];
     console.log(`  Found ${crossFileFindings.length} cross-file issues`);
   } catch {
@@ -251,7 +286,7 @@ Return ONLY cross-file findings as JSON:
 
 // ─── Phase 3: Independent Verification ──────────────────────────────────────
 
-async function runPhase3(allFindings, files) {
+async function runPhase3(allFindings: Record<string, unknown>, files: Record<string, string>) {
   console.log('Phase 3: Independent Verification (session-isolated)');
   console.log('─'.repeat(50));
 
@@ -312,11 +347,11 @@ Return JSON:
     }
   }
 
-  let verification = { verified_findings: [], summary: {} };
+  let verification: VerificationResult = { verified_findings: [], summary: {} };
 
   try {
     const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
-    verification = JSON.parse(jsonMatch[1].trim());
+    verification = JSON.parse(jsonMatch[1]!.trim()) as VerificationResult;
     const s = verification.summary || {};
     console.log(
       `  Reviewed: ${s.total_reviewed || 0}, Confirmed: ${s.confirmed || 0}, ` +
@@ -334,20 +369,20 @@ Return JSON:
 
 // ─── Phase 4: Confidence Filtering and Report ───────────────────────────────
 
-function generateReport(perFileResults, crossFileFindings, verification) {
+function generateReport(perFileResults: Record<string, PerFileResult>, crossFileFindings: Finding[], verification: VerificationResult) {
   console.log('Phase 4: Confidence Filtering and Report');
   console.log('─'.repeat(50));
 
   let totalPerFile = 0;
-  for (const result of Object.values(perFileResults)) {
+  for (const result of Object.values(perFileResults) as PerFileResult[]) {
     totalPerFile += result.findings?.length || 0;
   }
 
   const highConfidence = (verification.verified_findings || []).filter(
-    f => f.confidence >= CONFIDENCE_THRESHOLD
+    (f: VerifiedFinding) => (f.confidence ?? 0) >= CONFIDENCE_THRESHOLD
   );
   const lowConfidence = (verification.verified_findings || []).filter(
-    f => f.confidence < CONFIDENCE_THRESHOLD
+    (f: VerifiedFinding) => (f.confidence ?? 0) < CONFIDENCE_THRESHOLD
   );
 
   console.log(`
@@ -357,12 +392,12 @@ function generateReport(perFileResults, crossFileFindings, verification) {
 `);
 
   const hasCritical = highConfidence.some(
-    f => (f.adjusted_severity || f.original_severity) === 'critical' &&
+    (f: VerifiedFinding) => (f.adjusted_severity || f.original_severity) === 'critical' &&
          f.verification_status !== 'rejected'
   );
 
   const hasHigh = highConfidence.some(
-    f => (f.adjusted_severity || f.original_severity) === 'high' &&
+    (f: VerifiedFinding) => (f.adjusted_severity || f.original_severity) === 'high' &&
          f.verification_status !== 'rejected'
   );
 
@@ -415,9 +450,9 @@ async function main() {
 
   // Combine all findings for verification
   const allFindings = {
-    per_file_findings: Object.values(perFileResults)
-      .flatMap(r => (r.findings || []).map(f => ({ ...f, source: 'per-file' }))),
-    cross_file_findings: crossFileFindings.map(f => ({ ...f, source: 'cross-file' })),
+    per_file_findings: (Object.values(perFileResults) as PerFileResult[])
+      .flatMap((r: PerFileResult) => (r.findings || []).map((f: Finding) => ({ ...f, source: 'per-file' }))),
+    cross_file_findings: crossFileFindings.map((f: Finding) => ({ ...f, source: 'cross-file' })),
   };
 
   // Phase 3: Independent verification (session-isolated)

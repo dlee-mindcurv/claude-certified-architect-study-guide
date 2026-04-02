@@ -10,9 +10,16 @@
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface SampleDocument {
+  type: string;
+  raw: string;
+}
+
 // ─── Sample Documents ───────────────────────────────────────────────────────
 
-const sampleDocuments = {
+const sampleDocuments: Record<string, SampleDocument> = {
   'invoice-001': {
     type: 'invoice',
     raw: `INVOICE #INV-2025-0042
@@ -46,12 +53,12 @@ Governing Law: State of Delaware`,
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function ok(data) {
-  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+function ok(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
 }
 
-function err(category, message) {
-  return { content: [{ type: 'text', text: JSON.stringify({ errorCategory: category, isRetryable: false, message }) }], isError: true };
+function err(category: string, message: string) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify({ errorCategory: category, isRetryable: false, message }) }], isError: true };
 }
 
 // ─── Agent SDK tool() definitions ───────────────────────────────────────────
@@ -126,7 +133,7 @@ export const invoiceOutputSchema = {
 // ─── Accessors ──────────────────────────────────────────────────────────────
 
 export function getDocumentIds() { return Object.keys(sampleDocuments); }
-export function getDocument(id) { return sampleDocuments[id] || null; }
+export function getDocument(id: string) { return sampleDocuments[id] || null; }
 
 // ─── Legacy exports ─────────────────────────────────────────────────────────
 
@@ -137,11 +144,12 @@ export const extractionToolDefinitions = [
     input_schema: { type: 'object', properties: { document_id: { type: 'string' }, document_type: { type: 'string' }, fields_to_extract: { type: 'array', items: { type: 'string' } } }, required: ['document_id', 'document_type'] } },
 ];
 
-export function executeExtractionTool(toolName, toolInput) {
-  const lookup = { extract_metadata: extractMetadataTool, extract_data_points: extractDataPointsTool };
+export function executeExtractionTool(toolName: string, toolInput: Record<string, unknown>) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lookup: Record<string, { handler: (args: any, extra: any) => Promise<any> } | undefined> = { extract_metadata: extractMetadataTool, extract_data_points: extractDataPointsTool };
   const t = lookup[toolName];
   if (!t) return { isError: true, content: JSON.stringify({ errorCategory: 'validation', message: `Unknown: ${toolName}` }) };
-  let result;
-  t.handler(toolInput, {}).then(r => { result = r; });
-  return { isError: result?.isError ?? false, content: result?.content?.[0]?.text ?? '{}' };
+  let result: { isError?: boolean; content: Array<{ type: string; text?: string }> } | undefined;
+  t.handler(toolInput, {}).then((r: typeof result) => { result = r; });
+  return { isError: result?.isError ?? false, content: result!.content[0]!.text ?? '{}' };
 }

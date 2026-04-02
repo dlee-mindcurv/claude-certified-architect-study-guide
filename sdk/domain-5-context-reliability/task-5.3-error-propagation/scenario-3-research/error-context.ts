@@ -29,13 +29,70 @@ export const FAILURE_TYPES = {
   INVALID_QUERY: 'invalid_query',
   SERVICE_UNAVAILABLE: 'service_unavailable',
   PARTIAL_FAILURE: 'partial_failure',
-};
+} as const;
+
+type FailureType = typeof FAILURE_TYPES[keyof typeof FAILURE_TYPES];
+
+interface PartialResult {
+  claim: string;
+  source_name?: string;
+  confidence?: string;
+  _partialResult?: boolean;
+  _recoveryNote?: string;
+  _recoveredVia?: string;
+}
+
+interface SubagentError {
+  isError: true;
+  subagentId: string;
+  failureType: FailureType;
+  attemptedQuery: string;
+  partialResults: PartialResult[];
+  partialResultCount: number;
+  alternatives: string[];
+  timestamp: string;
+  recovery?: RecoveryExecutionResult;
+}
+
+interface ValidEmptyResult {
+  isError: false;
+  subagentId: string;
+  query: string;
+  results: never[];
+  totalResults: 0;
+  message: string;
+  coverageImplication: string;
+}
+
+interface SuccessResult {
+  isError: false;
+  topic: string;
+  findings: PartialResult[];
+  totalResults: number;
+  results?: PartialResult[];
+  query?: string;
+}
+
+type SubagentResult = SubagentError | ValidEmptyResult | SuccessResult;
+
+interface RecoveryPlan {
+  strategy: string;
+  shouldRetry: boolean;
+  usePartials: boolean;
+  coverageNote: string;
+}
+
+interface RecoveryExecutionResult {
+  findings: PartialResult[];
+  coverageNote: string;
+  recoveredSuccessfully: boolean;
+}
 
 /**
  * EXAM KEY CONCEPT: Structured errors carry enough context for the coordinator
  * to make an intelligent recovery decision.
  */
-export function createSubagentError({ failureType, attemptedQuery, partialResults = [], alternatives = [], subagentId = 'unknown' }) {
+export function createSubagentError({ failureType, attemptedQuery, partialResults = [], alternatives = [], subagentId = 'unknown' }: { failureType: FailureType; attemptedQuery: string; partialResults?: PartialResult[]; alternatives?: string[]; subagentId?: string }): SubagentError {
   return {
     isError: true,
     subagentId,
@@ -56,14 +113,14 @@ export function createSubagentError({ failureType, attemptedQuery, partialResult
  * Coverage gap (empty results): "No published sources exist on this topic"
  * Service failure (error):       "We could not search for this topic"
  */
-export function createValidEmptyResult({ query, subagentId = 'unknown' }) {
+export function createValidEmptyResult({ query: queryStr, subagentId = 'unknown' }: { query: string; subagentId?: string }): ValidEmptyResult {
   return {
     isError: false,
     subagentId,
-    query,
+    query: queryStr,
     results: [],
     totalResults: 0,
-    message: `Search completed successfully. No results found for: "${query}"`,
+    message: `Search completed successfully. No results found for: "${queryStr}"`,
     coverageImplication: 'Topic lacks published coverage in searched sources',
   };
 }
@@ -73,7 +130,7 @@ export function createValidEmptyResult({ query, subagentId = 'unknown' }) {
 // EXAM KEY CONCEPT: The coordinator inspects the structured error and chooses
 // a recovery strategy. It does NOT suppress errors or terminate.
 
-export function planRecovery(errorContext) {
+export function planRecovery(errorContext: SubagentError): RecoveryPlan {
   const { failureType, attemptedQuery, partialResults } = errorContext;
 
   switch (failureType) {
@@ -140,8 +197,8 @@ export function planRecovery(errorContext) {
 /**
  * Execute the recovery plan. Uses query() for retry subagents.
  */
-export async function executeRecovery(errorContext, recoveryPlan) {
-  const result = {
+export async function executeRecovery(errorContext: SubagentError, recoveryPlan: RecoveryPlan): Promise<RecoveryExecutionResult> {
+  const result: RecoveryExecutionResult = {
     findings: [],
     coverageNote: recoveryPlan.coverageNote,
     recoveredSuccessfully: false,
@@ -149,7 +206,7 @@ export async function executeRecovery(errorContext, recoveryPlan) {
 
   // Use partial results if available
   if (recoveryPlan.usePartials && errorContext.partialResults.length > 0) {
-    result.findings.push(...errorContext.partialResults.map(r => ({
+    result.findings.push(...errorContext.partialResults.map((r: PartialResult) => ({
       ...r, _partialResult: true, _recoveryNote: 'Obtained before subagent failure',
     })));
   }
@@ -196,8 +253,16 @@ export async function executeRecovery(errorContext, recoveryPlan) {
  * 3. Topic-caused gaps (no published sources exist)
  * 4. Partial coverage (some results obtained before failure)
  */
-export function buildCoverageAnnotations(subagentResults) {
-  const annotations = {
+
+interface CoverageAnnotations {
+  wellSupported: Array<{ topic: string; findingCount: number }>;
+  errorGaps: Array<{ topic: string; note: string; failureType: string }>;
+  topicGaps: Array<{ topic: string; note: string }>;
+  partialCoverage: Array<{ topic: string; findingCount: number; note: string; failureType: string }>;
+}
+
+export function buildCoverageAnnotations(subagentResults: SubagentResult[]): CoverageAnnotations {
+  const annotations: CoverageAnnotations = {
     wellSupported: [],
     errorGaps: [],
     topicGaps: [],
@@ -206,30 +271,32 @@ export function buildCoverageAnnotations(subagentResults) {
 
   for (const result of subagentResults) {
     if (result.isError) {
-      if (result.recovery?.findings?.length > 0) {
+      const errorResult = result as SubagentError;
+      if (errorResult.recovery?.findings?.length && errorResult.recovery.findings.length > 0) {
         annotations.partialCoverage.push({
-          topic: result.attemptedQuery,
-          findingCount: result.recovery.findings.length,
-          note: result.recovery.coverageNote,
-          failureType: result.failureType,
+          topic: errorResult.attemptedQuery,
+          findingCount: errorResult.recovery.findings.length,
+          note: errorResult.recovery.coverageNote,
+          failureType: errorResult.failureType,
         });
       } else {
         annotations.errorGaps.push({
-          topic: result.attemptedQuery,
-          note: result.recovery?.coverageNote || `Search failed: ${result.failureType}`,
-          failureType: result.failureType,
+          topic: errorResult.attemptedQuery,
+          note: errorResult.recovery?.coverageNote || `Search failed: ${errorResult.failureType}`,
+          failureType: errorResult.failureType,
         });
       }
     } else if (result.totalResults === 0) {
       annotations.topicGaps.push({
-        topic: result.query,
+        topic: (result as ValidEmptyResult).query,
         note: 'No published sources found. Topic lacks coverage.',
       });
     } else {
-      const count = result.findings?.length || result.results?.length || 0;
+      const successResult = result as SuccessResult;
+      const count = successResult.findings?.length || successResult.results?.length || 0;
       if (count >= 2) {
         annotations.wellSupported.push({
-          topic: result.topic || result.query,
+          topic: successResult.topic || (successResult as unknown as ValidEmptyResult).query,
           findingCount: count,
         });
       }
@@ -242,8 +309,8 @@ export function buildCoverageAnnotations(subagentResults) {
 /**
  * Render coverage annotations as markdown.
  */
-export function renderCoverageSection(annotations) {
-  const lines = ['## Coverage Assessment'];
+export function renderCoverageSection(annotations: CoverageAnnotations): string {
+  const lines: string[] = ['## Coverage Assessment'];
 
   if (annotations.wellSupported.length > 0) {
     lines.push('', '### Well-Supported Topics');
@@ -285,11 +352,11 @@ async function main() {
   console.log('='.repeat(60));
 
   // Simulate subagent results with different failure modes
-  const subagentResults = [
+  const subagentResults: SubagentResult[] = [
     { isError: false, topic: 'AI creative industries', findings: [
       { claim: 'AI tools are transforming visual arts', source_name: 'TechReview' },
       { claim: 'Studios adopt AI for VFX and scripting', source_name: 'Entertainment Tech' },
-    ], totalResults: 2 },
+    ], totalResults: 2 } as SuccessResult,
     createSubagentError({
       failureType: FAILURE_TYPES.TIMEOUT,
       attemptedQuery: 'AI music production 2025',
@@ -302,9 +369,10 @@ async function main() {
   // Run recovery for errors
   for (const result of subagentResults) {
     if (result.isError) {
-      const plan = planRecovery(result);
+      const errorResult = result as SubagentError;
+      const plan = planRecovery(errorResult);
       console.log(`\n  Strategy: ${plan.strategy}`);
-      result.recovery = await executeRecovery(result, plan);
+      errorResult.recovery = await executeRecovery(errorResult, plan);
     }
   }
 

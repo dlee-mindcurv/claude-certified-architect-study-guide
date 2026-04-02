@@ -23,18 +23,18 @@ import { z } from 'zod';
 
 // ─── Mock Data ────────────────────────────────────────────────────────────
 
-const customers = {
+const customers: Record<string, { id: string; name: string; email: string; tier: string }> = {
   'C-1001': { id: 'C-1001', name: 'Alice Johnson', email: 'alice@example.com', tier: 'gold' },
 };
-const orders = {
+const orders: Record<string, { orderId: string; customerId: string; total: number; status: string }> = {
   'ORD-5001': { orderId: 'ORD-5001', customerId: 'C-1001', total: 105.97, status: 'delivered' },
 };
 
-function ok(data) {
-  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+function ok(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
 }
-function err(msg) {
-  return { content: [{ type: 'text', text: JSON.stringify({ error: msg }) }], isError: true };
+function err(msg: string) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify({ error: msg }) }], isError: true };
 }
 
 // ─── BEFORE: Minimal (Vague) Descriptions ─────────────────────────────────
@@ -131,12 +131,12 @@ const preciseServer = createSdkMcpServer({
 // (which fails because no customer_id was verified first).
 // With precise descriptions, the agent calls get_customer first.
 
-async function runWithServer(label, mcpServer) {
+async function runWithServer(label: string, mcpServer: ReturnType<typeof createSdkMcpServer>): Promise<string[]> {
   console.log(`\n${'='.repeat(60)}`);
   console.log(label);
   console.log('='.repeat(60));
 
-  const toolLog = [];
+  const toolLog: string[] = [];
 
   for await (const message of query({
     prompt:
@@ -146,12 +146,12 @@ async function runWithServer(label, mcpServer) {
       maxTurns: 6,
       hooks: {
         // Log every tool call so we can compare routing order
-        postToolUse: async ({ toolName, toolInput }) => {
+        postToolUse: async ({ toolName, toolInput }: { toolName: string; toolInput: unknown }) => {
           toolLog.push(toolName);
           console.log(`  Tool call: ${toolName}(${JSON.stringify(toolInput)})`);
         },
       },
-    },
+    } as any,
   })) {
     if (message.type === 'result' && message.subtype === 'success') {
       console.log(`\n  Final: ${message.result.substring(0, 150)}...`);
@@ -162,7 +162,7 @@ async function runWithServer(label, mcpServer) {
   return toolLog;
 }
 
-async function main() {
+async function main(): Promise<void> {
   console.log('Task 2.1: Tool Description Quality — Before vs. After');
   console.log('Test query: "Can you check my order ORD-5001? My email is alice@example.com"');
   console.log('Correct sequence: get_customer(email) -> lookup_order(order_id, customer_id)\n');

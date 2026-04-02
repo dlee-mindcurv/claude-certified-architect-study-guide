@@ -212,10 +212,10 @@ ${examplesPrompt}`;
   console.log('\n--- Validation ---');
   try {
     const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, resultText];
-    const input = JSON.parse(jsonMatch[1].trim());
+    const input = JSON.parse(jsonMatch[1]!.trim()) as Record<string, unknown>;
 
-    const totalValue = input.monetary_values?.find(
-      v => v.label?.toLowerCase().includes('total') || v.label?.toLowerCase().includes('estimated')
+    const totalValue = (input.monetary_values as Array<Record<string, unknown>> | undefined)?.find(
+      (v: Record<string, unknown>) => (v.label as string | undefined)?.toLowerCase().includes('total') || (v.label as string | undefined)?.toLowerCase().includes('estimated')
     );
     if (totalValue) {
       const calculatedTotal = 6 * 15000 + 20000;

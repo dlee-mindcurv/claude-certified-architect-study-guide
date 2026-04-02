@@ -33,7 +33,7 @@ import { csrServer } from '../../shared/tools/csr-tools.js';
 // query() handles the loop internally (send → check stop_reason → execute
 // tools → loop). You iterate over the output messages.
 
-async function runAgent(userMessage) {
+async function runAgent(userMessage: string) {
   console.log(`\nCustomer: ${userMessage}\n`);
 
   // TODO 2: Call query() with:

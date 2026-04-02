@@ -10,9 +10,53 @@
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface Customer {
+  id: string;
+  name: string;
+  email: string;
+  tier: string;
+  accountStatus: string;
+  createdAt: string;
+}
+
+interface OrderItem {
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+interface Order {
+  orderId: string;
+  customerId: string;
+  items: OrderItem[];
+  total: number;
+  status: string;
+  orderDate: string;
+  deliveredAt?: string;
+  trackingNumber?: string;
+}
+
+interface Refund {
+  refundId: string;
+  orderId: string;
+  customerId: string;
+  amount: number;
+  reason: string;
+  status: string;
+  estimatedProcessingDays: number;
+  createdAt: string;
+}
+
+interface RawToolResult {
+  isError?: boolean;
+  content: string;
+}
+
 // ─── Mock Data ──────────────────────────────────────────────────────────────
 
-const customers = {
+const customers: Record<string, Customer> = {
   'C-1001': {
     id: 'C-1001', name: 'Alice Johnson', email: 'alice@example.com',
     tier: 'gold', accountStatus: 'active', createdAt: '2023-06-15T10:30:00Z',
@@ -23,7 +67,7 @@ const customers = {
   },
 };
 
-const orders = {
+const orders: Record<string, Order> = {
   'ORD-5001': {
     orderId: 'ORD-5001', customerId: 'C-1001',
     items: [
@@ -47,17 +91,17 @@ const orders = {
   },
 };
 
-const refunds = [];
+const refunds: Refund[] = [];
 
 // ─── Helper: format MCP CallToolResult ──────────────────────────────────────
 
-function ok(data) {
-  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+function ok(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
 }
 
-function err(errorCategory, message, isRetryable = false) {
+function err(errorCategory: string, message: string, isRetryable = false) {
   return {
-    content: [{ type: 'text', text: JSON.stringify({ errorCategory, isRetryable, message }) }],
+    content: [{ type: 'text' as const, text: JSON.stringify({ errorCategory, isRetryable, message }) }],
     isError: true,
   };
 }
@@ -225,16 +269,16 @@ export const csrToolDefinitions = [
   },
 ];
 
-export function executeCsrToolRaw(toolName, toolInput) {
+export function executeCsrToolRaw(toolName: string, toolInput: Record<string, unknown>): RawToolResult {
   switch (toolName) {
     case 'get_customer':
-      return handleGetCustomer(toolInput);
+      return handleGetCustomer(toolInput as { email?: string; customer_id?: string });
     case 'lookup_order':
-      return handleLookupOrder(toolInput);
+      return handleLookupOrder(toolInput as { order_id?: string; customer_id?: string });
     case 'process_refund':
-      return handleProcessRefund(toolInput);
+      return handleProcessRefund(toolInput as { order_id: string; customer_id: string; amount: number; reason: string });
     case 'escalate_to_human':
-      return handleEscalate(toolInput);
+      return handleEscalate(toolInput as { customer_id?: string; issue_summary: string; actions_taken?: string[]; recommended_action?: string; priority: string });
     default:
       return {
         isError: true,
@@ -247,7 +291,7 @@ export function executeCsrToolRaw(toolName, toolInput) {
   }
 }
 
-function handleGetCustomer({ email, customer_id }) {
+function handleGetCustomer({ email, customer_id }: { email?: string; customer_id?: string }): RawToolResult {
   // Simulate transient error (10% chance)
   if (Math.random() < 0.1) {
     return {
@@ -300,7 +344,7 @@ function handleGetCustomer({ email, customer_id }) {
   };
 }
 
-function handleLookupOrder({ order_id, customer_id }) {
+function handleLookupOrder({ order_id, customer_id }: { order_id?: string; customer_id?: string }): RawToolResult {
   if (!order_id || !customer_id) {
     return {
       isError: true,
@@ -338,7 +382,7 @@ function handleLookupOrder({ order_id, customer_id }) {
   return { content: JSON.stringify(order) };
 }
 
-function handleProcessRefund({ order_id, customer_id, amount, reason }) {
+function handleProcessRefund({ order_id, customer_id, amount, reason }: { order_id: string; customer_id: string; amount: number; reason: string }): RawToolResult {
   const order = orders[order_id];
   if (!order) {
     return {
@@ -402,7 +446,7 @@ function handleProcessRefund({ order_id, customer_id, amount, reason }) {
   return { content: JSON.stringify(refund) };
 }
 
-function handleEscalate({ customer_id, issue_summary, actions_taken, recommended_action, priority }) {
+function handleEscalate({ customer_id, issue_summary, actions_taken, recommended_action, priority }: { customer_id?: string; issue_summary: string; actions_taken?: string[]; recommended_action?: string; priority: string }): RawToolResult {
   const ticket = {
     ticketId: `ESC-${Date.now()}`,
     customerId: customer_id || 'unknown',
@@ -419,8 +463,9 @@ function handleEscalate({ customer_id, issue_summary, actions_taken, recommended
 }
 
 
-export function executeCsrTool(toolName, toolInput) {
-  const lookup = {
+export function executeCsrTool(toolName: string, toolInput: Record<string, unknown>) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lookup: Record<string, { handler: (args: any, extra: any) => Promise<any> } | undefined> = {
     get_customer: getCustomerTool,
     lookup_order: lookupOrderTool,
     process_refund: processRefundTool,
@@ -430,11 +475,11 @@ export function executeCsrTool(toolName, toolInput) {
   if (!t) return { isError: true, content: JSON.stringify({ errorCategory: 'validation', message: `Unknown tool: ${toolName}` }) };
 
   // Synchronous wrapper for legacy callers — call handler then flatten result
-  let result;
-  t.handler(toolInput, {}).then(r => { result = r; });
+  let result: { isError?: boolean; content: Array<{ type: string; text?: string }> } | undefined;
+  t.handler(toolInput, {}).then((r: typeof result) => { result = r; });
   // Since our handlers are sync internally, the promise resolves immediately
   return {
     isError: result?.isError ?? false,
-    content: result?.content?.[0]?.text ?? '{}',
+    content: result!.content[0]!.text ?? '{}',
   };
 }
