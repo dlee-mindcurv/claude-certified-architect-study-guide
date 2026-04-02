@@ -119,8 +119,63 @@ missing.
 
 | File | Description |
 |------|-------------|
-| `example-agent-sdk.js` | Coordinator using Agent SDK patterns (Task tool) |
-| `example-raw-api.js` | Coordinator using nested agentic loops (raw API) |
-| `exercise.md` | Build a coordinator with 2 subagents |
-| `scenario-3-research/coordinator.js` | Full research coordinator |
-| `scenario-4-devtools/coordinator.js` | Dev productivity coordinator |
+| `example-agent-sdk.ts` | Coordinator using Agent SDK patterns (Task tool) |
+| `example-raw-api.ts` | Coordinator using nested agentic loops (raw API) |
+| `exercise.md` | Build a coordinator with dynamic routing and 2 subagents |
+| `scenario-3-research/coordinator.ts` | Full research coordinator |
+| `scenario-4-devtools/coordinator.ts` | Dev productivity coordinator |
+
+### exercise2/ — Greeter Pipeline (Sequential Agent Chaining)
+
+A standalone Agent SDK application that demonstrates **sequential subagent execution** using the coordinator-subagent pattern. The coordinator chains two persona-based greeting agents and appends a pizza poem.
+
+**Pipeline flow:**
+```
+User Input
+    │
+    ▼
+┌──────────────────┐
+│   Coordinator    │
+│  (greeter-       │
+│   pipeline.ts)   │
+└──┬───────┬───────┘
+   │       │
+   │  Step 1: invoke jamaican-greeter
+   │       │
+   │       ▼
+   │  ┌────────────────┐
+   │  │ Jamaican       │  → Patois greeting
+   │  │ Greeter        │
+   │  └────────────────┘
+   │       │
+   │  Step 2: pass Jamaican response to pirate-greeter
+   │       │
+   │       ▼
+   │  ┌────────────────┐
+   │  │ Pirate         │  → Pirate translation
+   │  │ Greeter        │
+   │  └────────────────┘
+   │       │
+   │  Step 3: coordinator writes pizza poem
+   │       ▼
+   │  Final Output
+   └───────┘
+```
+
+| File | Description |
+|------|-------------|
+| `exercise2/greeter-pipeline.ts` | Entry file — coordinator with sequential execution logic |
+| `exercise2/jamaican-greeter.ts` | Subagent: warm Jamaican Patois persona |
+| `exercise2/pirate-greeter.ts` | Subagent: Captain Claubeard pirate persona |
+| `exercise2/pirate-movies.ts` | Subagent: pirate movie recommender (parallel execution) |
+
+**Run:**
+```bash
+npx tsx sdk/domain-1-agentic-architecture/task-1.2-coordinator-subagent/exercise2/greeter-pipeline.ts "Hello!"
+```
+
+**Key concepts demonstrated:**
+- Sequential vs parallel subagent execution within one coordinator
+- Persona-based subagents with no tools (pure text generation)
+- Passing one subagent's output as input to the next
+- Coordinator as the sole orchestrator — subagents never communicate directly

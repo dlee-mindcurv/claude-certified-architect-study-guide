@@ -37,15 +37,15 @@ const MAX_TURNS = 10;
 // This is the SAME agentic loop from Task 1.1, but used as a building block
 // inside the coordinator.
 
-async function runSubagentLoop(name, systemPrompt, allowedToolNames, taskDescription) {
+async function runSubagentLoop(name: string, systemPrompt: string, allowedToolNames: string[], taskDescription: string): Promise<string> {
   console.log(`\n  [${name}] Starting subagent loop...`);
 
   // Filter tools to only what this subagent is allowed to use
   // EXAM CONCEPT: Tool restriction — subagents don't get all tools
-  const tools = researchToolDefinitions.filter(t => allowedToolNames.includes(t.name));
+  const tools = researchToolDefinitions.filter(t => allowedToolNames.includes(t.name)) as Anthropic.Messages.Tool[];
 
   // Fresh message history — isolated context
-  const messages = [{ role: 'user', content: taskDescription }];
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: taskDescription }];
   let turnCount = 0;
 
   while (true) {
@@ -65,7 +65,7 @@ async function runSubagentLoop(name, systemPrompt, allowedToolNames, taskDescrip
     // Same stop_reason-driven loop as Task 1.1
     if (response.stop_reason === 'end_turn') {
       const text = response.content
-        .filter(b => b.type === 'text')
+        .filter((b): b is Anthropic.Messages.TextBlock => b.type === 'text')
         .map(b => b.text)
         .join('\n');
       console.log(`  [${name}] Complete (${turnCount} turns)`);
@@ -74,11 +74,11 @@ async function runSubagentLoop(name, systemPrompt, allowedToolNames, taskDescrip
 
     if (response.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: response.content });
-      const toolResults = [];
+      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
 
-      for (const block of response.content.filter(b => b.type === 'tool_use')) {
+      for (const block of response.content.filter((b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use')) {
         console.log(`    [${name}] Tool: ${block.name}(${JSON.stringify(block.input).substring(0, 60)}...)`);
-        const result = executeResearchTool(block.name, block.input);
+        const result = executeResearchTool(block.name, block.input as Record<string, unknown>);
 
         toolResults.push({
           type: 'tool_result',
@@ -106,7 +106,7 @@ async function runSubagentLoop(name, systemPrompt, allowedToolNames, taskDescrip
 // In the Agent SDK, this would be Task tool calls.
 // In raw API, this is manual orchestration.
 
-async function runCoordinatorRawApi(userQuery) {
+async function runCoordinatorRawApi(userQuery: string): Promise<string> {
   console.log('\n' + '='.repeat(60));
   console.log('Research Coordinator — Raw API Pattern');
   console.log('='.repeat(60));
@@ -125,11 +125,12 @@ Cover ALL relevant domains, not just the obvious ones.`,
     messages: [{ role: 'user', content: userQuery }],
   });
 
-  let plan;
+  let plan: { subtopics: string[]; needs_documents: boolean };
   try {
-    const text = planResponse.content[0].text;
+    const firstBlock = planResponse.content[0];
+    const text = firstBlock.type === 'text' ? firstBlock.text : '';
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    plan = JSON.parse(jsonMatch[0]);
+    plan = JSON.parse(jsonMatch![0]);
   } catch {
     plan = { subtopics: [userQuery], needs_documents: false };
   }
@@ -142,7 +143,7 @@ Cover ALL relevant domains, not just the obvious ones.`,
   // Each subagent gets a DIFFERENT subtopic and runs independently
   console.log('\nPhase 2: Parallel Search');
 
-  const searchTasks = plan.subtopics.map((subtopic, i) =>
+  const searchTasks = plan.subtopics.map((subtopic: string, i: number) =>
     runSubagentLoop(
       `search-${i + 1}`,
       searchSubagentPrompt,
@@ -172,7 +173,7 @@ Focus ONLY on "${subtopic}" — do not research other topics.`
   // EXAM CONCEPT: The coordinator EXPLICITLY passes all findings
   // The synthesis subagent has NO other way to access this data
   const allFindings = searchResults
-    .map((result, i) => `### ${plan.subtopics[i]}\n${result}`)
+    .map((result: string, i: number) => `### ${plan.subtopics[i]}\n${result}`)
     .join('\n\n');
 
   const synthesisResult = await runSubagentLoop(
@@ -204,11 +205,12 @@ Requirements:
     }],
   });
 
-  let quality;
+  let quality: { gaps: string[]; score: number };
   try {
-    const text = qualityResponse.content[0].text;
+    const firstBlock = qualityResponse.content[0];
+    const text = firstBlock.type === 'text' ? firstBlock.text : '';
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    quality = JSON.parse(jsonMatch[0]);
+    quality = JSON.parse(jsonMatch![0]);
   } catch {
     quality = { gaps: [], score: 7 };
   }
